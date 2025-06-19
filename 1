@@ -1,1 +1,49 @@
+import os
+import base64
+from elasticsearch import Elasticsearch
+from ME_weekly_cleanup_config import e_password, e_username, elasticsearch_url
+
+# Get the directory where the script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+alert_ids_file = os.path.join(script_dir, "Alert_ids.txt")
+
+# Initialize Elasticsearch client
+es = Elasticsearch(
+    [elasticsearch_url],
+    basic_auth=(e_username, e_password),
+)
+
+# Index pattern
+common_index = 'common-events-notification*'
+
+def delete_alerts():
+    try:
+        # Read IDs from the file in the same directory
+        with open(alert_ids_file, "r") as file:
+            ids = file.read().splitlines()
+
+        for doc_id in ids:
+            delete_query = {
+                "query": {
+                    "term": {
+                        "_id": doc_id
+                    }
+                }
+            }
+
+            response = es.delete_by_query(index=common_index, body=delete_query, conflicts="proceed", refresh=True)
+            deleted_count = response.get('deleted', 0)
+
+            if deleted_count > 0:
+                print(f"✅ Deleted document with ID: {doc_id}")
+            else:
+                print(f"⚠️ Document ID not found or already deleted: {doc_id}")
+
+    except FileNotFoundError:
+        print(f"❌ File not found: {alert_ids_file}")
+    except Exception as e:
+        print(f"❌ Error during deletion: {e}")
+
+# Run the deletion function
+delete_alerts()
 
