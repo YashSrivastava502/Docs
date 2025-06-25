@@ -1,1 +1,276 @@
+import requests
+import appinsight_report_config
+import json, time
+from datetime import datetime, timedelta, timezone
+from azure.identity import ClientSecretCredential
+from msal import ConfidentialClientApplication
+import csv
+import re
+import os
+import pandas as pd
+import smtplib
+from io import BytesIO
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+import subprocess
 
+# Tenant ID, Client ID, and Client Secret
+tenant_id = appinsight_report_config.TENANT_ID
+client_id = appinsight_report_config.CLIENT_ID
+client_secret = appinsight_report_config.CLIENT_SECRET
+user_id = appinsight_report_config.USER_ID
+id = appinsight_report_config.id
+
+# Azure credentials
+credential = ClientSecretCredential(tenant_id, client_id, client_secret)
+
+# Get access token
+access_token = credential.get_token("https://management.azure.com/.default").token
+
+def fetch_alerts(subscription_id):
+    end_time_utc = datetime.now(timezone.utc)
+    start_time_utc = end_time_utc - timedelta(minutes=1)
+    start_time_str = start_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time_str = end_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.AlertsManagement/alerts?customTimeRange={start_time_str}/{end_time_str}&api-version=2019-05-05-preview"
+    headers = {
+        "Authorization": f"Bearer {access_token}"
+    }
+    try:
+        requests.packages.urllib3.disable_warnings()
+        response = requests.get(url, headers=headers, verify=False)
+        if response.status_code == 200:
+            alerts = response.json()
+            filtered_alerts = []
+            for alert in alerts.get("value", []):
+                properties = alert.get("properties", {})
+                essentials = properties.get("essentials", {})
+                severity = essentials.get("severity", None)
+                target_resource = essentials.get("targetResource", None)
+                target_resource_name = essentials.get("targetResourceName", None)
+                alert_name = alert.get("name")
+                filtered_alert = {
+                    "severity": severity,
+                    "targetResource": target_resource,
+                    "targetResourceName": target_resource_name,
+                    "name": alert_name
+                }
+                filtered_alerts.append(filtered_alert)
+            return filtered_alerts
+        else:
+            print("Failed to fetch alerts. Status code:", response.status_code)
+            print("Response:", response.text)
+            return None
+    except Exception as e:
+        print("An error occurred:", e)
+        return None
+
+def save_to_json(alerts):
+    if alerts:
+        with open("alerts.json", "w") as f:
+            json.dump(alerts, f)
+        print("Filtered alerts saved to 'alerts.json' file.")
+
+def map_severity(severity):
+    if severity == "Sev0":
+        return "Critical"
+    elif severity == "Sev1":
+        return "Critical"
+    elif severity == "Sev2":
+        return "Warning"
+    elif severity == "Sev3":
+        return "Informational"
+    else:
+        return severity
+
+def send_email(api_name, owner_email, screenshot_filename, severity, alert_description, cc_email):
+    severity_label = map_severity(severity)
+    smtp_server = appinsight_report_config.SMTP_SERVER
+    smtp_port = appinsight_report_config.SMTP_PORT
+    sender_email = appinsight_report_config.SENDER_EMAIL
+    password = appinsight_report_config.SENDER_PASSWORD
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = owner_email
+    msg["Cc"] = cc_email
+    msg["Subject"] = f"Alert Fired: Severity:{severity_label} | {alert_description}"
+
+    body = f"""
+    <html>
+    <body>
+    <p>Hi Team,</p>
+    <p>We have received below alert from the subjected API. Kindly review and action accordingly. Alert details are as below,</p>
+    <p><b>Severity:</b> {severity_label}</p>
+    <p><b>Source:</b> {api_name}</p>
+    <p><b>Alert Description:</b> {alert_description}</p>
+    <p><b>Reference Snapshot:</b></p>
+    <p><img src="cid:screenshot"></p>
+    <p>Thanks & Regards,<br>EMS Team</p>
+    </body>
+    </html>
+    """
+    msg.attach(MIMEText(body, "html"))
+    with open(screenshot_filename, "rb") as f:
+        img = MIMEImage(f.read())
+        img.add_header("Content-Disposition", "inline", filename=os.path.basename(screenshot_filename))
+        img.add_header("Content-ID", "<screenshot>")
+        msg.attach(img)
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(sender_email, password)
+        server.send_message(msg)
+
+    os.remove(screenshot_filename)
+
+def sign_in(driver, email, password):
+    EMAILFIELD = (By.ID, "i0116")
+    PASSWORDFIELD = (By.ID, "i0118")
+    NEXTBUTTON = (By.ID, "idSIButton9")
+    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(EMAILFIELD)).send_keys(appinsight_report_config.SENDER_EMAIL)
+    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(NEXTBUTTON)).click()
+    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(PASSWORDFIELD)).send_keys(appinsight_report_config.SENDER_PASSWORD)
+    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(NEXTBUTTON)).click()
+    stay_signed_in_popup = driver.find_element(By.XPATH, "//div[contains(text(),'Stay signed in?')]")
+    if stay_signed_in_popup:
+        no_button = driver.find_element(By.XPATH, "//input[@value='No']")
+        no_button.click()
+    return driver
+
+def open_url_in_browser(driver, url):
+    driver.get(url)
+
+def capture_screenshot(driver, filename):
+    driver.save_screenshot(filename)
+
+def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+    base_url = "https://portal.azure.com/#@fareportal.com"
+    
+    # Launch Chrome with remote debugging port
+    try:
+        subprocess.Popen([
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "--remote-debugging-port=9222",
+            "--user-data-dir=C:\\Temp\\ChromeProfile",
+            "--headless=new"  # Keep headless mode as in original
+        ])
+        time.sleep(3)  # Wait for Chrome to start
+    except Exception as e:
+        print(f"Failed to launch Chrome: {e}. Ensure Chrome is installed or running with --remote-debugging-port=9222.")
+
+    # Configure Selenium to connect to existing Chrome instance
+    options = Options()
+    options.add_experimental_option("debuggerAddress", "localhost:9222")
+    driver = webdriver.Chrome(options=options)
+    driver.maximize_window()
+
+    target_resource = alert.get("targetResource")
+    target_resource_name = alert.get("targetResourceName")
+    severity = alert.get("severity")
+    alert_description = alert.get("name")
+    alert_description_lower = alert_description.lower()
+    print(alert_description_lower)
+    full_url = f"{base_url}/resource{target_resource}"
+
+    try:
+        driver.get(full_url)
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//body")))
+        
+        # Sign-in is not required, so skipping
+        # email = appinsight_report_config.SENDER_EMAIL
+        # password = appinsight_report_config.SENDER_PASSWORD
+        # sign_in(driver, email, password)
+
+        if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
+            failures_menu_locator = "div[data-telemetryname='Menu-failures']"
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, failures_menu_locator))).click()
+            if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
+                time.sleep(20)
+                iframe = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fxs-part-frame")))
+                print("Found iframe:", iframe)
+                driver.switch_to.frame(iframe)
+                button = driver.find_element(By.ID, "Dependencies")
+                button.click()
+                time.sleep(15)
+                screenshot_filename = f"screenshots/{target_resource_name}.png"
+                capture_screenshot(driver, screenshot_filename)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+                driver.quit()
+            elif "exception" in alert_description_lower:
+                time.sleep(20)
+                iframe = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fxs-part-frame")))
+                print("Found iframe:", iframe)
+                driver.switch_to.frame(iframe)
+                button = driver.find_element(By.ID, "Exceptions")
+                button.click()
+                time.sleep(15)
+                screenshot_filename = f"screenshots/{target_resource_name}.png"
+                capture_screenshot(driver, screenshot_filename)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+                driver.quit()
+        else:
+            time.sleep(20)
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div[data-telemetryname='Menu-performance']"))).click()
+            time.sleep(10)
+            screenshot_filename = f"screenshots/{target_resource_name}.png"
+            capture_screenshot(driver, screenshot_filename)
+            send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+            print(f"Alert email sent for {target_resource_name}")
+            driver.quit()
+    except TimeoutException:
+        print(f"Timeout occurred while loading {full_url}")
+    finally:
+        driver.quit()
+
+def fetch_data_from_onedrive():
+    authority = 'https://login.microsoftonline.com/' + tenant_id
+    app = ConfidentialClientApplication(client_id, authority=authority, client_credential=client_secret)
+    result = app.acquire_token_for_client(scopes=['https://graph.microsoft.com/.default'])
+    access_token = result['access_token']
+    my_files_url = f'https://graph.microsoft.com/v1.0/users/{user_id}/drive/root/children'
+    response = requests.get(my_files_url, headers={'Authorization': 'Bearer ' + access_token})
+    results = response.json()['value']
+    for item in results:
+        if item['name'] == 'Appinsight_alerts_receipients.xlsx':
+            receipient_file = item
+            break
+    if receipient_file:
+        receipient_file_url = receipient_file['@microsoft.graph.downloadUrl']
+        receipient_file_response = requests.get(receipient_file_url, headers={'Authorization': 'Bearer ' + access_token})
+        if receipient_file_response.status_code == 200:
+            receipient_content = BytesIO(receipient_file_response.content)
+            receipient_df_1 = pd.read_excel(receipient_content)
+            global recep_dict
+            recep_dict = dict(zip(receipient_df_1['API_Name'], receipient_df_1['Recipients (To)']))
+            global recep_dict2
+            recep_dict2 = dict(zip(receipient_df_1['API_Name'], receipient_df_1['Recipients (cc)']))
+
+if __name__ == "__main__":
+    try:
+        subscription_id = appinsight_report_config.SUBSCRIPTION_ID
+        alerts = fetch_alerts(subscription_id)
+        save_to_json(alerts)
+        if not os.path.exists("screenshots"):
+            os.makedirs("screenshots")
+        api_names_not_found = []
+        for alert in alerts:
+            fetch_data_from_onedrive()
+            owner_email = recep_dict.get(alert.get("targetResourceName"))
+            cc_email = recep_dict2.get(alert.get("targetResourceName"))
+            if owner_email is None:
+                print(f"No owner email found for API: {alert.get('targetResourceName')}.")
+                api_names_not_found.append(alert.get('targetResourceName'))
+                owner_email = appinsight_report_config.DEFAULT_EMAIL
+            process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2)
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
