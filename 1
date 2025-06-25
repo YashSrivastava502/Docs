@@ -1,1 +1,117 @@
+import subprocess
+import time
+import psutil
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
+def is_port_in_use(port):
+    """Check if the specified port is in use."""
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            return True
+    return False
+
+def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+    base_url = "https://portal.azure.com/#@fareportal.com"
+    debug_port = 9222
+    
+    # Launch Chrome with remote debugging port if not already running
+    if not is_port_in_use(debug_port):
+        try:
+            subprocess.Popen([
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                f"--remote-debugging-port={debug_port}",
+                "--user-data-dir=C:\\Temp\\ChromeProfile"  # Temporary profile
+            ])
+            time.sleep(5)  # Increased wait for Chrome to start
+            print(f"Launched Chrome with debugging port {debug_port}")
+        except Exception as e:
+            print(f"Failed to launch Chrome: {e}. Ensure Chrome is installed.")
+            return
+
+    # Configure Selenium to connect to existing Chrome instance
+    chrome_options = Options()
+    chrome_options.add_experimental_option("debuggerAddress", f"localhost:{debug_port}")
+    
+    # Initialize Selenium WebDriver
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.maximize_window()
+    except WebDriverException as e:
+        print(f"Failed to connect to Chrome: {e}. Ensure Chrome is running with --remote-debugging-port={debug_port}.")
+        return
+
+    target_resource = alert.get("targetResource")
+    target_resource_name = alert.get("targetResourceName")
+    severity = alert.get("severity")
+    alert_description = alert.get("name")
+    alert_description_lower = alert_description.lower()
+    print(alert_description_lower)
+    full_url = f"{base_url}/resource{target_resource}"
+
+    retries = 2
+    for attempt in range(retries):
+        try:
+            driver.get(full_url)
+            WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, "//body")))
+            
+            # Sign-in is not required
+            # email = appinsight_report_config.SENDER_EMAIL
+            # password = appinsight_report_config.SENDER_PASSWORD
+            # sign_in(driver, email, password)
+
+            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
+                failures_menu_locator = "div[data-telemetryname='Menu-failures']"
+                WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, failures_menu_locator))).click()
+                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
+                    time.sleep(20)
+                    iframe = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fxs-part-frame")))
+                    print("Found iframe:", iframe)
+                    driver.switch_to.frame(iframe)
+                    button = driver.find_element(By.ID, "Dependencies")
+                    button.click()
+                    time.sleep(15)
+                    screenshot_filename = f"screenshots/{target_resource_name}.png"
+                    driver.save_screenshot(screenshot_filename)
+                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                    print(f"Alert email sent for {target_resource_name}")
+                    driver.quit()
+                elif "exception" in alert_description_lower:
+                    time.sleep(20)
+                    iframe = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fxs-part-frame")))
+                    print("Found iframe:", iframe)
+                    driver.switch_to.frame(iframe)
+                    button = driver.find_element(By.ID, "Exceptions")
+                    button.click()
+                    time.sleep(15)
+                    screenshot_filename = f"screenshots/{target_resource_name}.png"
+                    driver.save_screenshot(screenshot_filename)
+                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                    print(f"Alert email sent for {target_resource_name}")
+                    driver.quit()
+            else:
+                time.sleep(20)
+                WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div[data-telemetryname='Menu-performance']"))).click()
+                time.sleep(10)
+                screenshot_filename = f"screenshots/{target_resource_name}.png"
+                driver.save_screenshot(screenshot_filename)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+                driver.quit()
+            break
+        except TimeoutException:
+            print(f"Timeout occurred while loading {full_url} (attempt {attempt + 1}/{retries})")
+            if attempt == retries - 1:
+                print("Max retries reached. Skipping alert.")
+        except WebDriverException as e:
+            print(f"WebDriver error: {e}")
+            break
+        finally:
+            try:
+                driver.quit()
+            except:
+                pass
