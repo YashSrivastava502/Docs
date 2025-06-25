@@ -1,15 +1,1 @@
-def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
-    base_url = "https://portal.azure.com/#@fareportal.com"
-    service = webdriver.chrome.service.Service(executable_path='C:/Jobs/Staging/EMS/ChromeDriver/chromedriver.exe')
-    options = webdriver.ChromeOptions()
-    
-    # Attach to logged-in Chrome profile
-    options.add_argument(r"--user-data-dir=C:\Users\y.s.va22\AppData\Local\Google\Chrome\User Data")
-    options.add_argument(r"--profile-directory=Default")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
 
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.maximize_window()
-
-  
