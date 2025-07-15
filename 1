@@ -1,14 +1,153 @@
-provider "azurerm" {
-  features {}
+variable "resource_group_name" {
+  description = "Name of the existing resource group"
+  type        = string
 }
 
-module "vpn" {
-  source                   = "./modules/vpn"
-  resource_group_name      = var.resource_group_name
-  location                 = var.location
-  vnet_name                = var.vnet_name
-  gateway_subnet_prefix    = var.gateway_subnet_prefix
-  onprem_public_ip         = var.onprem_public_ip
-  onprem_address_space     = var.onprem_address_space
-  shared_key               = var.shared_key
+variable "vnet_name" {
+  description = "Name of the existing virtual network"
+  type        = string
 }
+
+variable "location" {
+  description = "Azure region"
+  type        = string
+  default     = "East US"
+}
+
+variable "gateway_subnet_prefix" {
+  description = "Address prefix for the GatewaySubnet"
+  type        = string
+  default     = "10.0.2.0/24"
+}
+
+variable "onprem_public_ip" {
+  description = "Public IP address of the on-premises VPN device"
+  type        = string
+}
+
+variable "onprem_address_space" {
+  description = "Address space of the on-premises network"
+  type        = list(string)
+}
+
+variable "shared_key" {
+  description = "Shared key for the VPN connection"
+  type        = string
+  sensitive   = true
+}
+
+output "virtual_network_gateway_id" {
+  description = "ID of the virtual network gateway"
+  value       = module.vpn.virtual_network_gateway_id
+}
+
+output "vpn_connection_id" {
+  description = "ID of the VPN connection"
+  value       = module.vpn.vpn_connection_id
+}
+
+
+
+resource "azurerm_subnet" "gateway_subnet" {
+  name                 = "GatewaySubnet"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = var.vnet_name
+  address_prefixes     = [var.gateway_subnet_prefix]
+}
+
+resource "azurerm_public_ip" "gateway_pip" {
+  name                = "vpn-gateway-pip"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  allocation_method   = "Dynamic"
+}
+
+resource "azurerm_virtual_network_gateway" "vng" {
+  name                = "vpn-gateway"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+
+  type     = "Vpn"
+  vpn_type = "RouteBased"
+  sku      = "VpnGw1"
+
+  ip_configuration {
+    public_ip_address_id          = azurerm_public_ip.gateway_pip.id
+    private_ip_address_allocation = "Dynamic"
+    subnet_id                     = azurerm_subnet.gateway_subnet.id
+  }
+}
+
+resource "azurerm_local_network_gateway" "lng" {
+  name                = "onprem-gateway"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  gateway_address     = var.onprem_public_ip
+  address_space       = var.onprem_address_space
+}
+
+resource "azurerm_virtual_network_gateway_connection" "vpn_connection" {
+  name                            = "site-to-site-vpn"
+  resource_group_name             = var.resource_group_name
+  location                        = var.location
+  type                            = "IPsec"
+  virtual_network_gateway_id      = azurerm_virtual_network_gateway.vng.id
+  local_network_gateway_id        = azurerm_local_network_gateway.lng.id
+  shared_key                      = var.shared_key
+  connection_protocol             = "IKEv2"
+}
+
+
+variable "resource_group_name" {
+  description = "Name of the resource group"
+  type        = string
+}
+
+variable "location" {
+  description = "Azure region"
+  type        = string
+}
+
+variable "vnet_name" {
+  description = "Name of the virtual network"
+  type        = string
+}
+
+variable "gateway_subnet_prefix" {
+  description = "Address prefix for the GatewaySubnet"
+  type        = string
+}
+
+variable "onprem_public_ip" {
+  description = "Public IP address of the on-premises VPN device"
+  type        = string
+}
+
+variable "onprem_address_space" {
+  description = "Address space of the on-premises network"
+  type        = list(string)
+}
+
+variable "shared_key" {
+  description = "Shared key for the VPN connection"
+  type        = string
+  sensitive   = true
+}
+
+
+output "virtual_network_gateway_id" {
+  description = "ID of the virtual network gateway"
+  value       = azurerm_virtual_network_gateway.vng.id
+}
+
+output "vpn_connection_id" {
+  description = "ID of the VPN connection"
+  value       = azurerm_virtual_network_gateway_connection.vpn_connection.id
+}
+
+output "public_ip_id" {
+  description = "ID of the public IP"
+  value       = azurerm_public_ip.gateway_pip.id
+}
+
+
