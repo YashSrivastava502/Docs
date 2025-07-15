@@ -1,10 +1,19 @@
-variable "resource_group_name" {
-  description = "Name of the existing resource group"
-  type        = string
+provider "azurerm" {
+  features {}
 }
 
-variable "vnet_name" {
-  description = "Name of the existing virtual network"
+module "vpn" {
+  source                   = "./modules/vpn"
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
+  gateway_subnet_id        = var.gateway_subnet_id
+  onprem_public_ip         = var.onprem_public_ip
+  onprem_address_space     = var.onprem_address_space
+  shared_key               = var.shared_key
+}
+
+variable "resource_group_name" {
+  description = "Name of the existing resource group"
   type        = string
 }
 
@@ -14,10 +23,9 @@ variable "location" {
   default     = "East US"
 }
 
-variable "gateway_subnet_prefix" {
-  description = "Address prefix for the GatewaySubnet"
+variable "gateway_subnet_id" {
+  description = "ID of the existing GatewaySubnet"
   type        = string
-  default     = "10.0.2.0/24"
 }
 
 variable "onprem_public_ip" {
@@ -36,6 +44,7 @@ variable "shared_key" {
   sensitive   = true
 }
 
+
 output "virtual_network_gateway_id" {
   description = "ID of the virtual network gateway"
   value       = module.vpn.virtual_network_gateway_id
@@ -47,13 +56,6 @@ output "vpn_connection_id" {
 }
 
 
-
-resource "azurerm_subnet" "gateway_subnet" {
-  name                 = "GatewaySubnet"
-  resource_group_name  = var.resource_group_name
-  virtual_network_name = var.vnet_name
-  address_prefixes     = [var.gateway_subnet_prefix]
-}
 
 resource "azurerm_public_ip" "gateway_pip" {
   name                = "vpn-gateway-pip"
@@ -74,7 +76,7 @@ resource "azurerm_virtual_network_gateway" "vng" {
   ip_configuration {
     public_ip_address_id          = azurerm_public_ip.gateway_pip.id
     private_ip_address_allocation = "Dynamic"
-    subnet_id                     = azurerm_subnet.gateway_subnet.id
+    subnet_id                     = var.gateway_subnet_id
   }
 }
 
@@ -97,7 +99,6 @@ resource "azurerm_virtual_network_gateway_connection" "vpn_connection" {
   connection_protocol             = "IKEv2"
 }
 
-
 variable "resource_group_name" {
   description = "Name of the resource group"
   type        = string
@@ -108,13 +109,8 @@ variable "location" {
   type        = string
 }
 
-variable "vnet_name" {
-  description = "Name of the virtual network"
-  type        = string
-}
-
-variable "gateway_subnet_prefix" {
-  description = "Address prefix for the GatewaySubnet"
+variable "gateway_subnet_id" {
+  description = "ID of the existing GatewaySubnet"
   type        = string
 }
 
@@ -149,5 +145,13 @@ output "public_ip_id" {
   description = "ID of the public IP"
   value       = azurerm_public_ip.gateway_pip.id
 }
+
+
+resource_group_name    = "my-resource-group"
+location              = "East US"
+gateway_subnet_id     = "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/GatewaySubnet"
+onprem_public_ip      = "203.0.113.1"
+onprem_address_space  = ["192.168.1.0/24"]
+shared_key            = "your-secure-shared-key"
 
 
