@@ -9,8 +9,8 @@ module "vpn" {
   gateway_subnet_id        = var.gateway_subnet_id
   onprem_public_ip         = var.onprem_public_ip
   onprem_address_space     = var.onprem_address_space
-  shared_key               = var.shared_key
 }
+
 
 variable "resource_group_name" {
   description = "Name of the existing resource group"
@@ -38,11 +38,6 @@ variable "onprem_address_space" {
   type        = list(string)
 }
 
-variable "shared_key" {
-  description = "Shared key for the VPN connection"
-  type        = string
-  sensitive   = true
-}
 
 
 output "virtual_network_gateway_id" {
@@ -50,11 +45,10 @@ output "virtual_network_gateway_id" {
   value       = module.vpn.virtual_network_gateway_id
 }
 
-output "vpn_connection_id" {
-  description = "ID of the VPN connection"
-  value       = module.vpn.vpn_connection_id
+output "local_network_gateway_id" {
+  description = "ID of the local network gateway"
+  value       = module.vpn.local_network_gateway_id
 }
-
 
 
 resource "azurerm_public_ip" "gateway_pip" {
@@ -88,16 +82,8 @@ resource "azurerm_local_network_gateway" "lng" {
   address_space       = var.onprem_address_space
 }
 
-resource "azurerm_virtual_network_gateway_connection" "vpn_connection" {
-  name                            = "site-to-site-vpn"
-  resource_group_name             = var.resource_group_name
-  location                        = var.location
-  type                            = "IPsec"
-  virtual_network_gateway_id      = azurerm_virtual_network_gateway.vng.id
-  local_network_gateway_id        = azurerm_local_network_gateway.lng.id
-  shared_key                      = var.shared_key
-  connection_protocol             = "IKEv2"
-}
+
+
 
 variable "resource_group_name" {
   description = "Name of the resource group"
@@ -124,21 +110,15 @@ variable "onprem_address_space" {
   type        = list(string)
 }
 
-variable "shared_key" {
-  description = "Shared key for the VPN connection"
-  type        = string
-  sensitive   = true
-}
-
 
 output "virtual_network_gateway_id" {
   description = "ID of the virtual network gateway"
   value       = azurerm_virtual_network_gateway.vng.id
 }
 
-output "vpn_connection_id" {
-  description = "ID of the VPN connection"
-  value       = azurerm_virtual_network_gateway_connection.vpn_connection.id
+output "local_network_gateway_id" {
+  description = "ID of the local network gateway"
+  value       = azurerm_local_network_gateway.lng.id
 }
 
 output "public_ip_id" {
@@ -147,11 +127,12 @@ output "public_ip_id" {
 }
 
 
+
 resource_group_name    = "my-resource-group"
 location              = "East US"
 gateway_subnet_id     = "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/GatewaySubnet"
 onprem_public_ip      = "203.0.113.1"
 onprem_address_space  = ["192.168.1.0/24"]
-shared_key            = "your-secure-shared-key"
 
 
+az network vnet subnet show --resource-group <resource-group> --vnet-name <vnet-name> --name GatewaySubnet --query id --output tsv
