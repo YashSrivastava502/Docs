@@ -39,7 +39,6 @@ variable "onprem_address_space" {
 }
 
 
-
 output "virtual_network_gateway_id" {
   description = "ID of the virtual network gateway"
   value       = module.vpn.virtual_network_gateway_id
@@ -48,6 +47,11 @@ output "virtual_network_gateway_id" {
 output "local_network_gateway_id" {
   description = "ID of the local network gateway"
   value       = module.vpn.local_network_gateway_id
+}
+
+output "public_ip_id" {
+  description = "ID of the public IP"
+  value       = module.vpn.public_ip_id
 }
 
 
@@ -81,7 +85,6 @@ resource "azurerm_local_network_gateway" "lng" {
   gateway_address     = var.onprem_public_ip
   address_space       = var.onprem_address_space
 }
-
 
 
 
@@ -127,7 +130,6 @@ output "public_ip_id" {
 }
 
 
-
 resource_group_name    = "my-resource-group"
 location              = "East US"
 gateway_subnet_id     = "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/GatewaySubnet"
@@ -136,3 +138,7 @@ onprem_address_space  = ["192.168.1.0/24"]
 
 
 az network vnet subnet show --resource-group <resource-group> --vnet-name <vnet-name> --name GatewaySubnet --query id --output tsv
+
+
+
+
