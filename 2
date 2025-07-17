@@ -1,1 +1,28 @@
+#!/bin/bash
 
+# Script to transfer and restore backup from DB1 to DB2 (10.250.64.10)
+
+# Exit on any error
+set -e
+
+# Step 1: Log in to DB2 and set up /tmp
+ssh sysadmin@10.250.64.10 "sudo chmod 1777 /tmp"
+
+# Step 2: Set up .pgpass on DB2
+ssh sysadmin@10.250.64.10 "sudo -u postgres bash -c 'echo \"10.250.64.10:5432:*:postgres:drdengdemo@2025#\" > ~postgres/.pgpass'"
+ssh sysadmin@10.250.64.10 "sudo -u postgres chmod 0600 ~postgres/.pgpass"
+
+# Step 3: Transfer backup file from DB1 to DB2
+scp /tmp/all_databases.sql sysadmin@10.250.64.10:/tmp/
+
+# Step 4: Verify the file on DB2
+ssh sysadmin@10.250.64.10 "ls -lh /tmp/all_databases.sql"
+
+# Step 5: Restore the backup
+ssh sysadmin@10.250.64.10 "sudo -u postgres psql -h 10.250.64.10 -p 5432 -f /tmp/all_databases.sql"
+
+# Step 6: Verify the restore
+ssh sysadmin@10.250.64.10 "sudo -u postgres psql -h 10.250.64.10 -p 5432 -l"
+ssh sysadmin@10.250.64.10 "sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c \"\dt\""
+
+echo "Restore completed successfully on DB2"
