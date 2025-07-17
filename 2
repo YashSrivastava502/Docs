@@ -1,15 +1,13 @@
-sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'DROP TABLE IF EXISTS test_sync;'
-
-sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'CREATE TABLE test_sync (id SERIAL PRIMARY KEY, data TEXT); INSERT INTO test_sync (data) VALUES ('"'"'Sync test'"'"');'
-
-sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -c 'SELECT * FROM pg_stat_replication;'
 
 
-ssh sysadmin@10.250.64.10
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'DROP TABLE IF EXISTS verify_repl; CREATE TABLE verify_repl (id SERIAL PRIMARY KEY, data TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);'
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'INSERT INTO verify_repl (data) VALUES ('"'"'Replication test 1'"'"');'
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'SELECT * FROM verify_repl;'
+
+
 sudo -u postgres psql -h 10.250.64.10 -p 5432 -c 'SELECT pg_is_in_recovery();'
 
-sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
-
-
-ssh sysadmin@10.250.64.12
-sudo -u postgres psql -h 10.250.64.12 -p 5432 -c 'SELECT * FROM pg_stat_replication;'
+sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c 'SELECT * FROM verify_repl;'
