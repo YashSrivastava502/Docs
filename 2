@@ -1,1 +1,29 @@
+#!/bin/bash
 
+# Script to back up all databases on DB1 (10.250.64.12) to /tmp/all_databases.sql
+
+# Exit on any error
+set -e
+
+# Step 1: Ensure /tmp is writable
+sudo chmod 1777 /tmp
+
+# Step 2: Set up .pgpass for postgres user
+sudo -u postgres bash -c 'echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass'
+sudo -u postgres chmod 0600 ~postgres/.pgpass
+
+# Step 3: Run pg_dumpall
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /tmp/all_databases.sql
+
+# Step 4: Verify the backup file
+ls -lh /tmp/all_databases.sql
+
+echo "Backup completed successfully at /tmp/all_databases.sql"
+
+
+
+nano backup_db1.sh
+# Copy and paste the script above
+# Save: Ctrl+O, Enter, Ctrl+X
+chmod +x backup_db1.sh
+./backup_db1.sh
