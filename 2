@@ -1,1 +1,207 @@
+sudo apt update
+sudo apt install postgresql -y
+
+sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'Yash@0505';"
+
+nano /tmp/setup_db1.sql
+
+\c postgres;
+
+DO $$ 
+DECLARE 
+  dbname TEXT;
+  i INT := 1;
+BEGIN
+  FOR i IN 1..4 LOOP
+    dbname := format('app_db%s', i);
+    EXECUTE format('DROP DATABASE IF EXISTS %I', dbname);
+    EXECUTE format('CREATE DATABASE %I', dbname);
+  END LOOP;
+END $$;
+
+
+sudo -u postgres psql -f /tmp/setup_db1.sql
+
+
+sudo mv /home/sysadmin/setup_db1.sql /tmp/
+sudo -u postgres psql -f /tmp/setup_db1.sql
+
+else part hai 
+Option 2: Give read access to the file and your home dir (not recommended for security)
+
+chmod +r /home/sysadmin/setup_db1.sql
+chmod +x /home/sysadmin
+sudo -u postgres psql -f /home/sysadmin/setup_db1.sql
+
+
+nano /tmp/setup_db1_fixed.sql
+
+-- Run this on 'postgres' database
+DROP DATABASE IF EXISTS app_db1;
+DROP DATABASE IF EXISTS app_db2;
+DROP DATABASE IF EXISTS app_db3;
+DROP DATABASE IF EXISTS app_db4;
+
+CREATE DATABASE app_db1;
+CREATE DATABASE app_db2;
+CREATE DATABASE app_db3;
+CREATE DATABASE app_db4;
+
+sudo -u postgres psql -f /tmp/setup_db1_fixed.sql
+
+
+
+
+for db in app_db1 app_db2 app_db3 app_db4
+do
+  echo "Setting up $db..."
+  sudo -u postgres psql -d $db <<EOF
+DROP TABLE IF EXISTS data_events, transactions, activity_logs, system_info;
+
+CREATE TABLE data_events (
+  id SERIAL PRIMARY KEY,
+  event_date DATE,
+  value INT
+);
+
+CREATE TABLE transactions (
+  id SERIAL PRIMARY KEY,
+  created_at TIMESTAMP,
+  amount NUMERIC
+);
+
+CREATE TABLE activity_logs (
+  id SERIAL PRIMARY KEY,
+  log_time TIMESTAMP,
+  activity TEXT
+);
+
+CREATE TABLE system_info (
+  id SERIAL PRIMARY KEY,
+  info TEXT,
+  status TEXT
+);
+
+-- Insert dummy data for 30 days
+INSERT INTO data_events (event_date, value)
+SELECT CURRENT_DATE - (i || ' days')::interval, ROUND((random()*100)::numeric)
+FROM generate_series(0,29) AS i;
+
+INSERT INTO transactions (created_at, amount)
+SELECT CURRENT_DATE - (i || ' days')::interval + time '10:00', ROUND((random()*1000)::numeric, 2)
+FROM generate_series(0,29) AS i;
+
+INSERT INTO activity_logs (log_time, activity)
+SELECT CURRENT_DATE - (i || ' days')::interval + time '15:00', 'Activity ' || i
+FROM generate_series(0,29) AS i;
+
+-- Insert non-date-based data
+INSERT INTO system_info (info, status)
+SELECT 'Info ' || i, CASE WHEN i % 2 = 0 THEN 'OK' ELSE 'FAIL' END
+FROM generate_series(1,10) AS i;
+EOF
+done
+
+
+
+sudo -u postgres psql -d app_db1 -c "\dt"
+sudo -u postgres psql -d app_db1 -c "SELECT COUNT(*) FROM data_events;"
+
+
+chmod +x /home/sysadmin
+
+
+List All Databases
+sudo -u postgres psql -c "\l"
+List All Tables in Each Database
+for db in app_db1 app_db2 app_db3 app_db4
+do
+  echo "📂 Tables in $db:"
+  sudo -u postgres psql -d $db -c "\dt"
+done
+
+
+View Sample Data from All Tables
+for db in app_db1 app_db2 app_db3 app_db4
+do
+  echo "🔎 $db: data_events"
+  sudo -u postgres psql -d $db -c "SELECT * FROM data_events LIMIT 5;"
+
+  echo "🔎 $db: transactions"
+  sudo -u postgres psql -d $db -c "SELECT * FROM transactions LIMIT 5;"
+
+  echo "🔎 $db: activity_logs"
+  sudo -u postgres psql -d $db -c "SELECT * FROM activity_logs LIMIT 5;"
+
+  echo "🔎 $db: system_info"
+  sudo -u postgres psql -d $db -c "SELECT * FROM system_info LIMIT 5;"
+done
+
+
+for db in app_db1 app_db2 app_db3 app_db4
+do
+  echo "🔎 $db: system_info"
+  sudo -u postgres psql -d $db -c "SELECT * FROM system_info ;"
+done
+
+
+for db in app_db1 app_db2 app_db3 app_db4
+do
+  echo "🔎 $db: data_events"
+  sudo -u postgres psql -d $db -c "SELECT * FROM data_events ;"
+
+  echo "🔎 $db: transactions"
+  sudo -u postgres psql -d $db -c "SELECT * FROM transactions ;"
+
+  echo "🔎 $db: activity_logs"
+  sudo -u postgres psql -d $db -c "SELECT * FROM activity_logs ;"
+
+  echo "🔎 $db: system_info"
+  sudo -u postgres psql -d $db -c "SELECT * FROM system_info ;"
+done
+
+
+__________________________________________________
+
+Check if PostgreSQL is running
+
+SSH into 10.0.0.4 (i.e. db-test-1):
+
+sudo systemctl status postgresql
+
+If not running, start it:
+
+sudo systemctl start postgresql
+
+2. Allow remote connections
+
+Edit postgresql.conf:
+
+sudo nano /etc/postgresql/14/main/postgresql.conf
+
+Ensure:
+
+listen_addresses = '*'
+
+3. Allow your client IP in pg_hba.conf
+
+Edit pg_hba.conf:
+
+sudo nano /etc/postgresql/14/main/pg_hba.conf
+
+Add this line (if not already there):
+
+host    all             all             10.0.0.0/24            md5
+
+    Replace 10.0.0.0/24 with the subnet of db-test-2 if different.
+
+4. Restart PostgreSQL
+
+sudo systemctl restart postgresql
+
+5. Test connectivity from db-test-2
+
+On db-test-2:
+
+psql -h 10.0.0.4 -U postgres -W
 
