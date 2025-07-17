@@ -1,1 +1,15 @@
+sudo mkdir -p /var/lib/pgsql
+sudo chown postgres:postgres /var/lib/pgsql
+sudo chmod 700 /var/lib/pgsql
 
+sudo -i -u postgres
+echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass
+chmod 0600 ~postgres/.pgpass
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -l
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -c "GRANT ALL ON DATABASE templatel TO postgres;"
+
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /var/lib/pgsql/all_databases.sql
+
+ls -lh /var/lib/pgsql/all_databases.sql
