@@ -1,1 +1,53 @@
+2. Create and set permissions for /var/lib/pgsql
+User: sysadmin
 
+
+sudo mkdir -p /var/lib/pgsql
+sudo chown postgres:postgres /var/lib/pgsql
+sudo chmod 700 /var/lib/pgsql
+
+3. Set up .pgpass for postgres
+User: sysadmin
+
+sudo -u postgres bash -c 'echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass'
+sudo -u postgres chmod 0600 ~postgres/.pgpass
+
+
+
+4. List databases to check for templatel
+User: postgres
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -l
+
+If templatel exists:
+
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -c "GRANT ALL ON DATABASE templatel TO postgres;"
+
+5. Run pg_dumpall
+User: postgres
+
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /var/lib/pgsql/all_databases.sql
+
+Alternative (if /var/lib/pgsql fails):
+
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /tmp/all_databases.sql
+
+6. Verify the backup
+User: sysadmin or postgres
+
+ls -lh /var/lib/pgsql/all_databases.sql
+
+Or, if using /tmp:
+
+ls -lh /tmp/all_databases.sql
+
+Alternative (if pg_dumpall fails due to templatel)
+User: postgres
+
+sudo -u postgres bash
+cd /var/lib/pgsql
+for db in $(psql -h 10.250.64.12 -p 5432 -t -c "SELECT datname FROM pg_database WHERE datname NOT IN ('template0', 'template1', 'postgres');"); do
+  pg_dump -h 10.250.64.12 -p 5432 -Fc $db > ${db}_backup.dump
+done
+pg_dumpall -h 10.250.64.12 -p 5432 --globals-only > globals.sql
+exit
