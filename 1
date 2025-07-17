@@ -1,101 +1,31 @@
-resource "azurerm_public_ip" "vpn_public_ip" {
-  name                = "${var.prefix}-vpn-gateway-pip"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  allocation_method   = "Dynamic"
-  sku                 = "Basic"
+variable "resource_group_name" {
+  description = "The name of the resource group"
+  type        = string
+  default     = "usel-dr-rgpe1"
 }
 
-resource "azurerm_virtual_network_gateway" "vpn_gateway" {
-  name                = "${var.prefix}-vpn-gateway"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-
-  type     = "Vpn"
-  vpn_type = "RouteBased"
-  active_active = false
-  enable_bgp    = false
-  sku           = "VpnGw1"
-
-  ip_configuration {
-    name                          = "vnetGatewayConfig"
-    public_ip_address_id          = azurerm_public_ip.vpn_public_ip.id
-    subnet_id                     = var.gateway_subnet_id
-    private_ip_address_allocation = "Dynamic"
-  }
-
-  depends_on = [azurerm_public_ip.vpn_public_ip]
+variable "location" {
+  description = "Azure region for resource deployment"
+  type        = string
+  default     = "East US"
 }
 
-resource "azurerm_local_network_gateway" "local_network" {
-  name                = "${var.prefix}-local-network"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-  gateway_address     = var.local_gateway_ip
-  address_space       = var.local_address_space
+variable "gateway_subnet_id" {
+  description = "The ID of the GatewaySubnet within the VNet"
+  type        = string
 }
 
-resource "azurerm_virtual_network_gateway_connection" "vpn_connection" {
-  name                = "${var.prefix}-vpn-connection"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-
-  type                       = "IPsec"
-  virtual_network_gateway_id = azurerm_virtual_network_gateway.vpn_gateway.id
-  local_network_gateway_id   = azurerm_local_network_gateway.local_network.id
-  shared_key                 = var.shared_key
+variable "local_gateway_ip" {
+  description = "The public IP address of the on-premises VPN device"
+  type        = string
 }
 
-variable "prefix" {}
-variable "location" {}
-variable "resource_group_name" {}
-variable "gateway_subnet_id" {}
-variable "local_gateway_ip" {}
 variable "local_address_space" {
-  type = list(string)
-}
-variable "shared_key" {}
-
-output "vpn_gateway_id" {
-  value = azurerm_virtual_network_gateway.vpn_gateway.id
+  description = "The address space of the on-premises network"
+  type        = list(string)
 }
 
-output "local_network_gateway_id" {
-  value = azurerm_local_network_gateway.local_network.id
+variable "shared_key" {
+  description = "The shared IPSec key for VPN authentication"
+  type        = string
 }
-
-
-provider "azurerm" {
-  features {}
-}
-
-module "vpn_gateway" {
-  source              = "./modules/vpn_gateway"
-  prefix              = "myvpn"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  gateway_subnet_id   = var.gateway_subnet_id
-  local_gateway_ip    = var.local_gateway_ip
-  local_address_space = var.local_address_space
-  shared_key          = var.shared_key
-}
-
-variable "location" {}
-variable "resource_group_name" {}
-variable "gateway_subnet_id" {}
-variable "local_gateway_ip" {}
-variable "local_address_space" {
-  type = list(string)
-}
-variable "shared_key" {}
-
-
-location            = "East US"
-resource_group_name = "my-rg"
-gateway_subnet_id   = "/subscriptions/<id>/resourceGroups/my-rg/providers/Microsoft.Network/virtualNetworks/my-vnet/subnets/GatewaySubnet"
-local_gateway_ip    = "203.0.113.1"
-local_address_space = ["10.0.0.0/24"]
-shared_key          = "SuperSecretKey123"
-
-
-
