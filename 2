@@ -1,1 +1,41 @@
+sudo mkdir -p /var/lib/pgsql/14/data
+sudo chown -R postgres:postgres /var/lib/pgsql
+sudo chmod -R 700 /var/lib/pgsql
 
+
+ls -ld /var/lib/pgsql
+ls -ld /var/lib/pgsql/14/data
+
+
+sudo -u postgres bash -c 'echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass'
+sudo -u postgres chmod 0600 ~postgres/.pgpass
+
+
+sudo -u postgres sh -c 'cd /tmp && pg_basebackup -h 10.250.64.12 -p 5432 -U postgres -D /var/lib/pgsql/14/data/ -Fp --checkpoint=fast -R'
+
+ls -l /var/lib/pgsql/14/data/
+
+
+sudo -u postgres nano /var/lib/pgsql/14/data/postgresql.conf
+
+hot_standby = on
+primary_conninfo = 'host=10.250.64.12 port=5432 user=postgres password=drdengdemo@2025#'
+
+ls /var/lib/pgsql/14/data/standby.signal
+
+sudo chown -R postgres:postgres /var/lib/pgsql/14/data/
+sudo chmod -R 700 /var/lib/pgsql/14/data/
+
+
+ssh sysadmin@10.250.64.12
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -c 'SELECT * FROM pg_stat_replication;'
+
+ssh sysadmin@10.250.64.10
+sudo -u postgres psql -h 10.250.64.10 -p 5432 -c 'SELECT pg_is_in_recovery();'
+
+
+ssh sysadmin@10.250.64.12
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'CREATE TABLE test_sync (id SERIAL PRIMARY KEY, data TEXT); INSERT INTO test_sync (data) VALUES ("Sync test");'
+
+ssh sysadmin@10.250.64.10
+sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
