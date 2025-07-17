@@ -1,58 +1,15 @@
-#!/bin/bash
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'DROP TABLE IF EXISTS test_sync;'
 
-# Script to configure DB2 (10.250.64.10) as a standby for WAL-based streaming replication with DB1 (10.250.64.12)
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'CREATE TABLE test_sync (id SERIAL PRIMARY KEY, data TEXT); INSERT INTO test_sync (data) VALUES ('"'"'Sync test'"'"');'
 
-# Exit on any error
-set -e
-
-# Step 1: Fix permissions on /var/lib/pgsql
-sudo mkdir -p /var/lib/pgsql/14/data
-sudo chown -R postgres:postgres /var/lib/pgsql
-sudo chmod -R 700 /var/lib/pgsql
-ls -ld /var/lib/pgsql
-ls -ld /var/lib/pgsql/14/data
-
-# Step 2: Set up .pgpass for postgres user
-sudo -u postgres sh -c 'echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass'
-sudo -u postgres chmod 0600 ~postgres/.pgpass
-sudo -u postgres cat ~postgres/.pgpass
-
-# Step 3: Stop PostgreSQL and clear data directory
-sudo systemctl stop postgresql
-sudo -u postgres rm -rf /var/lib/pgsql/14/data/*
-
-# Step 4: Run pg_basebackup
-sudo -u postgres sh -c 'cd /tmp && pg_basebackup -h 10.250.64.12 -p 5432 -U postgres -D /var/lib/pgsql/14/data -Fp --checkpoint=fast -R'
-
-# Step 5: Configure postgresql.conf for standby
-sudo -u postgres sh -c 'cat << EOF >> /var/lib/pgsql/14/data/postgresql.conf
-hot_standby = on
-primary_conninfo = 'host=10.250.64.12 port=5432 user=postgres password=drdengdemo@2025#'
-EOF'
-
-# Step 6: Verify standby.signal
-sudo -u postgres ls /var/lib/pgsql/14/data/standby.signal
-
-# Step 7: Set permissions again
-sudo chown -R postgres:postgres /var/lib/pgsql/14/data/
-sudo chmod -R 700 /var/lib/pgsql/14/data/
-
-# Step 8: Start PostgreSQL
-sudo systemctl start postgresql
-
-# Step 9: Verify standby mode
-sudo -u postgres psql -h 10.250.64.10 -p 5432 -c 'SELECT pg_is_in_recovery();'
-
-# Step 10: Test replication sync
-sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
-
-echo "DB2 standby configuration and verification completed successfully"
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
 
 
 ssh sysadmin@10.250.64.10
-# Password: drdengdemo@2025#
-nano setup_db2_replication.sh
-# Copy and paste the script above
-# Save: Ctrl+O, Enter, Ctrl+X
-chmod +x setup_db2_replication.sh
-./setup_db2_replication.sh
+sudo -u postgres psql -h 10.250.64.10 -p 5432 -c 'SELECT pg_is_in_recovery();'
+
+sudo -u postgres psql -h 10.250.64.10 -p 5432 -d app_db1 -c 'SELECT * FROM test_sync;'
+
+
+ssh sysadmin@10.250.64.12
+sudo -u postgres psql -h 10.250.64.12 -p 5432 -c 'SELECT * FROM pg_stat_replication;'
