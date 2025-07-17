@@ -1,1 +1,7 @@
+sudo -i -u postgres
+cd /var/lib/pgsql
+pg_dumpall -h 10.250.64.12 -p 5432 > all_databases.sql
+exit
 
+
+ls -lh /var/lib/pgsql/all_databases.sql
