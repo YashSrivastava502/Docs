@@ -1,1 +1,7 @@
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /var/lib/pgsql/all_databases.sql
 
+sudo -i -u postgres
+echo "10.250.64.12:5432:*:postgres:drdengdemo@2025#" > ~postgres/.pgpass
+chmod 0600 ~postgres/.pgpass
+
+sudo -u postgres pg_dumpall -h 10.250.64.12 -p 5432 > /var/lib/pgsql/all_databases.sql
