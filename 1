@@ -1,51 +1,150 @@
-from playwright.sync_api import sync_playwright
-import time
+**Title: Domain Controller (DC) Setup Across Different VNets - POC Guide**
 
-def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
-    base_url = "https://portal.azure.com/#@fareportal.com"
-    target_resource = alert.get("targetResource")
-    target_resource_name = alert.get("targetResourceName")
-    severity = alert.get("severity")
-    alert_description = alert.get("name")
-    alert_description_lower = alert_description.lower()
-    print(alert_description_lower)
-    full_url = f"{base_url}/resource{target_resource}"
+---
 
-    screenshot_filename = f"screenshots/{target_resource_name}.png"
+## Objective
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=r"C:\Users\y.s.va22\AppData\Local\Google\Chrome\User Data",
-            headless=False,
-        )
-        page = browser.new_page()
-        try:
-            page.goto(full_url, timeout=60000)
-            page.wait_for_load_state("networkidle")
-            time.sleep(20)  # Let the page fully render
+To deploy and validate Active Directory Domain Controllers in two separate VNets, simulating a hybrid or geo-redundant setup. Ensure AD replication and fault tolerance between the primary (DC1) and secondary (DC2) domain controllers.
 
-            if "failed" in alert_description_lower or "failure" in alert_description_lower:
-                page.click("div[data-telemetryname='Menu-failures']", timeout=10000)
+---
 
-                # Wait for iframe and switch
-                iframe_element = page.wait_for_selector("iframe.fxs-part-frame", timeout=20000)
-                frame = iframe_element.content_frame()
+## Key Concepts
 
-                if "dependency" in alert_description_lower:
-                    frame.click("#Dependencies", timeout=10000)
-                elif "exception" in alert_description_lower:
-                    frame.click("#Exceptions", timeout=10000)
+### What is a Domain Controller (DC)?
 
-                time.sleep(15)
-            else:
-                page.click("div[data-telemetryname='Menu-performance']", timeout=10000)
-                time.sleep(10)
+A Domain Controller is a server that responds to authentication requests and verifies users on computer networks. It stores AD DS (Active Directory Domain Services) data and manages domain security, user/group authentication, and Group Policy enforcement.
 
-            page.screenshot(path=screenshot_filename, full_page=True)
-            send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-            print(f"Alert email sent for {target_resource_name}")
+---
 
-        except Exception as e:
-            print(f"Playwright error: {e}")
-        finally:
-            browser.close()
+## Prerequisites
+
+* Two VNets (VNet1 and VNet2) with peering
+* Two Windows Server VMs (Server 2019/2022)
+* Admin rights on both VMs
+* Open required ports (TCP 135, 389, 636, 3268, 3269, 53, 445, RPC range 49152–65535)
+
+---
+
+## Phase 1: Infrastructure Setup
+
+1. **Create VNets**: VNet1 and VNet2 in Azure with non-overlapping IP ranges
+2. **Create VMs**: Deploy two Windows Server VMs (VM1 in VNet1, VM2 in VNet2)
+3. **Peer VNets**:
+
+   * Enable peering with access to remote gateway and forwarded traffic
+4. **Set Static Private IPs** for both VMs
+5. **Configure NSGs** to allow AD and DNS traffic
+
+---
+
+## Phase 2: Promote DC1 (Primary Domain Controller)
+
+1. Log in to VM1
+
+2. Rename the computer (e.g., DC1)
+
+3. Install AD DS Role:
+
+   ```powershell
+   Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+   ```
+
+4. Promote to Domain Controller:
+
+   * Open Server Manager > Promote this server to a domain controller
+   * Select: Add a new forest (e.g., domain name: corp.local)
+   * Configure Directory Services Restore Mode (DSRM) password
+   * Reboot server after installation
+
+5. Verify:
+
+   * Open `Active Directory Users and Computers`
+   * Ensure domain and AD DS services are functional
+
+---
+
+## Phase 3: Promote DC2 (Secondary Domain Controller)
+
+1. Log in to VM2
+2. Rename the computer (e.g., DC2)
+3. Set DC1's IP as Preferred DNS Server in network settings
+4. Join Domain:
+
+   * System Properties > Change > Join domain `corp.local`
+   * Reboot after joining
+5. Install AD DS Role:
+
+   ```powershell
+   Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+   ```
+6. Promote to Additional Domain Controller:
+
+   * Server Manager > Promote this server > Add DC to existing domain
+   * Use domain credentials of domain admin (from DC1)
+   * Install DNS and Global Catalog
+   * Reboot after promotion
+
+---
+
+## Phase 4: Replication & Validation
+
+1. Verify replication:
+
+   ```powershell
+   repadmin /replsummary
+   repadmin /showrepl
+   dcdiag
+   ```
+
+2. Test Cases:
+
+   * Create user/OU on DC1 > verify on DC2
+   * Create GPO on DC2 > verify on DC1
+   * Shutdown DC1 and test login via DC2
+   * Monitor Event Viewer for replication issues
+
+---
+
+## Best Practices
+
+### What to Do:
+
+* Maintain at least two DCs for redundancy
+* Enable regular backup of AD and SYSVOL
+* Secure DCs with NSGs and Azure Security Center
+* Configure Sites and Subnets in AD Sites and Services
+
+### What Not to Do:
+
+* Don’t expose DCs to the internet
+* Avoid installing unnecessary services on DCs
+* Don’t use dynamic IPs for DCs
+
+---
+
+## Advantages
+
+* High Availability and Redundancy
+* Geo-distributed Disaster Recovery
+* Load Balancing for authentication
+* Simplified hybrid identity management
+
+## Disadvantages
+
+* Higher Azure cost (VMs, storage, bandwidth)
+* Configuration complexity
+* Risk of replication errors without proper setup
+
+---
+
+## Monitoring Tools
+
+* `repadmin`, `dcdiag`, Event Viewer
+* Azure Monitor + Log Analytics for VM performance
+* AD DS health checks
+
+---
+
+## Conclusion
+
+This POC validates that a multi-VNet domain controller setup works effectively and replicates changes in real-time. It's a strong candidate for hybrid cloud scenarios or for increasing availability in production environments.
