@@ -19,15 +19,22 @@ $domains = @(
 )
 
 # === SMTP CONFIGURATION ===
-$smtpServer = "192.168.1.100"           # Your SMTP relay
+$smtpServer = "192.168.1.100"         # Replace with your internal SMTP relay
 $smtpPort = 25
 $from = "dns-monitor@corp.local"
 $to = "admin@corp.local"
-$subject = "DNS FOR FROM DOMAIN NAME"   # Fixed subject
+$cc = "ITEngbg@corp.local"           # Add ITEngbg as CC
+$subject = "DNS FOR FROM DOMAIN NAME"
 
-# === BUILD THE OUTPUT ===
-$report = "🧾 DNS Lookup Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" + "`n`n"
+# === EMAIL BODY HEADER ===
+$report = @"
+Please review below DNS outputs (all names should resolve to akamaiedge, except clubmiles):
 
+🧾 DNS Lookup Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+
+"@
+
+# === PERFORM LOOKUPS ===
 foreach ($domain in $domains) {
     $report += "=== $domain ===`n"
     try {
@@ -38,8 +45,8 @@ foreach ($domain in $domains) {
     }
 }
 
-# === SEND EMAIL WITH COMBINED REPORT ===
+# === SEND EMAIL ===
 Send-MailMessage -SmtpServer $smtpServer -Port $smtpPort `
-    -From $from -To $to -Subject $subject -Body $report
+    -From $from -To $to -Cc $cc -Subject $subject -Body $report
 
-Write-Host "📧 DNS report email sent for all domains."
+Write-Host "📧 DNS report email sent with CC to $cc"
