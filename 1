@@ -1,1 +1,104 @@
+✅ DC1 Setup – Step-by-Step
 
+🔹 1. Install AD DS and DNS Roles
+
+1. Log in to DC1 via RDP
+
+
+2. Open Server Manager
+
+
+3. Click Add Roles and Features
+
+
+4. Select:
+
+Role-based installation
+
+Server: DC1
+
+Roles:
+
+Active Directory Domain Services
+
+DNS Server
+
+
+
+
+5. Click Next → Install → Close when done
+
+
+
+
+---
+
+🔹 2. Promote to Primary Domain Controller
+
+1. In Server Manager, click the flag warning → "Promote this server"
+
+
+2. Choose:
+
+Add a new forest
+
+Root domain name: corp.local
+
+
+
+3. Set:
+
+DSRM Password
+
+Leave DNS checked
+
+NetBIOS: CORP
+
+
+
+4. Click Next → Install
+
+
+5. VM will reboot
+
+
+
+
+---
+
+🔹 3. Create DNS Zones
+
+1. After reboot, open DNS Manager (dnsmgmt.msc)
+
+
+2. Expand → Right-click Forward Lookup Zones → New Zone
+
+Zone Type: Primary Zone
+
+Replication Scope: To all domain controllers in the forest
+
+Names: yash.local, hamed.local, aryaman.local, kushal.local
+
+Click Finish
+
+
+
+
+
+---
+
+🔹 4. Add A-records in Each Zone
+
+1. For each zone (e.g., yash.local):
+
+Right-click → New Host (A or AAAA)
+
+Name: test
+
+IP: 10.0.0.10 (dummy IP for test)
+
+Click Add Host
+
+
+
+2. Repeat for all 4 zones
