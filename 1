@@ -1,1 +1,45 @@
+# === DOMAIN LIST ===
+$domains = @(
+    "m.cheapoair.com",
+    "www.onetravel.com",
+    "m.onetravel.com",
+    "www.cheapoair.ca",
+    "m.cheapoair.ca",
+    "cheapoair.co.uk",
+    "m.cheapoair.co.uk",
+    "www.cheapoair.com/es-us",
+    "m.cheapoair.com/es-us",
+    "www.cheapoair.mx",
+    "m.cheapoair.mx",
+    "www.farebuzz.com",
+    "m.farebuzz.com",
+    "www.insanelycheapflights.com",
+    "m.insanelycheapflights.com",
+    "www.clubmiles.com"
+)
 
+# === SMTP CONFIGURATION ===
+$smtpServer = "192.168.1.100"           # Your SMTP relay
+$smtpPort = 25
+$from = "dns-monitor@corp.local"
+$to = "admin@corp.local"
+$subject = "DNS FOR FROM DOMAIN NAME"   # Fixed subject
+
+# === BUILD THE OUTPUT ===
+$report = "🧾 DNS Lookup Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" + "`n`n"
+
+foreach ($domain in $domains) {
+    $report += "=== $domain ===`n"
+    try {
+        $lookup = nslookup $domain 2>&1
+        $report += ($lookup -join "`n") + "`n`n"
+    } catch {
+        $report += "❌ Error looking up $domain: $_`n`n"
+    }
+}
+
+# === SEND EMAIL WITH COMBINED REPORT ===
+Send-MailMessage -SmtpServer $smtpServer -Port $smtpPort `
+    -From $from -To $to -Subject $subject -Body $report
+
+Write-Host "📧 DNS report email sent for all domains."
