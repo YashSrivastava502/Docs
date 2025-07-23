@@ -1,1 +1,45 @@
+# === DOMAIN TO CHECK ===
+$domain = "www.cheapoair.com"
+$expectedName = "e86859.dsca.akamaiedge.net"
+$expectedAliases = @(
+    "www.cheapoair.com",
+    "www.cheapoair.com.edgekey.net"
+)
 
+# === SMTP CONFIGURATION (NO LOGIN REQUIRED) ===
+$smtpServer = "192.168.1.100"           # Replace with your SMTP relay IP/hostname
+$smtpPort = 25
+$from = "dns-monitor@corp.local"
+$to = "admin@corp.local"
+$subject = "DNS FOR FROM DOMAIN NAME"   # Fixed subject as you want
+
+# === RUN NSLOOKUP ===
+try {
+    $nslookupRaw = nslookup $domain 2>&1
+    $nslookupOutput = $nslookupRaw -join "`n"
+} catch {
+    $nslookupOutput = "❌ Error running nslookup for $domain: $_"
+}
+
+# === PARSE OUTPUT ===
+$nameLine = $nslookupRaw | Where-Object { $_ -match "^Name:\s+" }
+$aliasLines = $nslookupRaw | Where-Object { $_ -match "^\s*Aliases?:\s+" -or ($_ -match "^\s{1,}\S+\.\S+") }
+
+$nameValue = $nameLine -replace "^Name:\s+", "" -replace "\s+$", ""
+$aliasesFound = $aliasLines | ForEach-Object { $_.Trim() -replace "^Aliases?:\s+", "" } | Where-Object { $_ -ne "" }
+
+# === MATCH CHECK (for logging only) ===
+$nameMatches = ($nameValue -eq $expectedName)
+$aliasesMatch = ($expectedAliases | Sort-Object) -join "," -eq ($aliasesFound | Sort-Object) -join ","
+
+if ($nameMatches -and $aliasesMatch) {
+    Write-Host "✅ DNS matches expected values."
+} else {
+    Write-Host "❌ DNS mismatch detected!"
+}
+
+# === SEND EMAIL ALWAYS ===
+Send-MailMessage -SmtpServer $smtpServer -Port $smtpPort `
+    -From $from -To $to -Subject $subject -Body $nslookupOutput
+
+Write-Host "📧 Email sent with subject: '$subject'"
