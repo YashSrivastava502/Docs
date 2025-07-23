@@ -1,104 +1,105 @@
-✅ DC1 Setup – Step-by-Step
+✅ DC2 Setup – Step-by-Step
 
-🔹 1. Install AD DS and DNS Roles
+🔹 1. Join Domain
 
-1. Log in to DC1 via RDP
+1. RDP into DC2
+
+
+2. Right-click Start → System → Rename PC
+
+
+3. Change:
+
+Domain: corp.local
+
+Enter Domain Admin user from DC1
+
+
+
+4. Click OK → Reboot
+
+
+
+
+---
+
+🔹 2. Install AD DS and DNS Roles
+
+1. Log in as domain user (CORP\Administrator)
 
 
 2. Open Server Manager
 
 
-3. Click Add Roles and Features
+3. Add Roles and Features:
 
-
-4. Select:
-
-Role-based installation
-
-Server: DC1
-
-Roles:
-
-Active Directory Domain Services
+AD DS
 
 DNS Server
 
 
 
+4. After install → Click Promote this server
 
-5. Click Next → Install → Close when done
+Option: Add a domain controller to an existing domain
 
+Use domain: corp.local
 
+Keep DNS + Global Catalog checked
 
-
----
-
-🔹 2. Promote to Primary Domain Controller
-
-1. In Server Manager, click the flag warning → "Promote this server"
-
-
-2. Choose:
-
-Add a new forest
-
-Root domain name: corp.local
+Set DSRM password
 
 
 
-3. Set:
-
-DSRM Password
-
-Leave DNS checked
-
-NetBIOS: CORP
-
-
-
-4. Click Next → Install
-
-
-5. VM will reboot
+5. Click Install → Reboot
 
 
 
 
 ---
 
-🔹 3. Create DNS Zones
+✅ Validation & Testing
 
-1. After reboot, open DNS Manager (dnsmgmt.msc)
+🔹 1. Verify DNS Replication
 
+On DC2 → Open DNS Manager
 
-2. Expand → Right-click Forward Lookup Zones → New Zone
+Check if zones:
 
-Zone Type: Primary Zone
-
-Replication Scope: To all domain controllers in the forest
-
-Names: yash.local, hamed.local, aryaman.local, kushal.local
-
-Click Finish
+yash.local, hamed.local, etc. are visible
 
 
+Open each → Check for test A-record
 
 
 
 ---
 
-🔹 4. Add A-records in Each Zone
+🔹 2. CLI Testing
 
-1. For each zone (e.g., yash.local):
+On DC2, run:
 
-Right-click → New Host (A or AAAA)
+nslookup test.yash.local
+repadmin /replsummary
 
-Name: test
-
-IP: 10.0.0.10 (dummy IP for test)
-
-Click Add Host
+You should see the test records resolve and successful replication status.
 
 
+---
 
-2. Repeat for all 4 zones
+🔹 3. Optional: Test Change from DC2
+
+On DC2:
+
+Add A-record: hello.kushal.local → IP: 10.0.0.99
+
+
+Wait ~30 seconds or run:
+
+repadmin /syncall /AdeP
+
+Go to DC1 → Refresh DNS → Check if hello.kushal.local appears
+
+
+
+---
