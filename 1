@@ -1,1 +1,51 @@
 
+---
+- name: Configure FortiGate Address Objects and Group
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Ping FortiGate device
+      command: ping -c 2 {{ fortigate_ip }}
+      register: ping_result
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Show result if FortiGate is up
+      debug:
+        msg: " FortiGate is reachable"
+      when: ping_result.rc == 0
+
+    - name: Show result if FortiGate is down
+      debug:
+        msg: " FortiGate is unreachable"
+      when: ping_result.rc != 0
+
+    - name: Create Address Objects on FortiGate
+      expect:
+        command: ssh {{ uname }}@{{ fortigate_ip }}
+        responses:
+          (?i)password: "{{ password1 }}"
+          #:
+            - "config firewall address"
+            - "{% for item in address_objects %}edit {{ item.name }}\nset type {{ item.type }}\n{% if item.type == 'subnet' %}set subnet {{ item.subnet }}\n{% elif item.type == 'fqdn' %}set fqdn {{ item.fqdn }}\n{% endif %}set comment {{ comment_string }}\nnext\n{% endfor %}end"
+            - "exit"
+      when: ping_result.rc == 0
+      delegate_to: localhost
+      no_log: true
+
+    - name: Create Address Group with all members
+      expect:
+        command: ssh {{ uname }}@{{ fortigate_ip }}
+        responses:
+          (?i)password: "{{ password1 }}"
+          #:
+            - "config firewall addrgrp"
+            - "edit {{ address_group_name }}"
+            - "{% for item in address_objects %}append member {{ item.name }}\n{% endfor %}set comment {{ comment_string }}"
+            - "next"
+            - "end"
+            - "exit"
+      when: ping_result.rc == 0
+      delegate_to: localhost
+      no_log: true
