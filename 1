@@ -1,105 +1,58 @@
-✅ DC2 Setup – Step-by-Step
+# === DNS SETTINGS ===
+$domain = "www.cheapoair.com"
+$expectedName = "e86859.dsca.akamaiedge.net"
+$expectedAliases = @(
+    "www.cheapoair.com",
+    "www.cheapoair.com.edgekey.net"
+)
 
-🔹 1. Join Domain
+# === SMTP SETTINGS ===
+$smtpServer = "192.168.1.100"      # Change to your SMTP server IP or hostname
+$smtpPort = 25                     # Port (25 or 587 usually)
+$from = "dns-monitor@corp.local"  # Sender
+$to = "admin@corp.local"          # Recipient
+$subject = "❌ DNS Mismatch for $domain"
 
-1. RDP into DC2
+# === RUN NSLOOKUP ===
+$nslookupOutput = nslookup $domain | Out-String
 
+# === PARSE OUTPUT ===
+$nameLine = ($nslookupOutput -split "`n") | Where-Object { $_ -match "^Name:\s+" }
+$aliasLines = ($nslookupOutput -split "`n") | Where-Object { $_ -match "^\s*Aliases?:\s+" -or ($_ -match "^\s{1,}\S+\.\S+") }
 
-2. Right-click Start → System → Rename PC
+$nameValue = $nameLine -replace "^Name:\s+", "" -replace "\s+$", ""
+$aliasesFound = $aliasLines | ForEach-Object { $_.Trim() -replace "^Aliases?:\s+", "" } | Where-Object { $_ -ne "" }
 
+# === VALIDATION ===
+$nameMatches = ($nameValue -eq $expectedName)
+$aliasesMatch = ($expectedAliases | Sort-Object) -join "," -eq ($aliasesFound | Sort-Object) -join ","
 
-3. Change:
+# === LOGIC ===
+if ($nameMatches -and $aliasesMatch) {
+    Write-Host "✅ DNS matches expected values."
+} else {
+    Write-Host "❌ DNS mismatch detected!"
+    
+    $body = @"
+DNS Mismatch Detected for $domain
 
-Domain: corp.local
+Expected Name:
+$expectedName
 
-Enter Domain Admin user from DC1
+Actual Name:
+$nameValue
 
+Expected Aliases:
+$($expectedAliases -join "`n")
 
+Actual Aliases:
+$($aliasesFound -join "`n")
 
-4. Click OK → Reboot
+Full nslookup output:
+$nslookupOutput
+"@
 
-
-
-
----
-
-🔹 2. Install AD DS and DNS Roles
-
-1. Log in as domain user (CORP\Administrator)
-
-
-2. Open Server Manager
-
-
-3. Add Roles and Features:
-
-AD DS
-
-DNS Server
-
-
-
-4. After install → Click Promote this server
-
-Option: Add a domain controller to an existing domain
-
-Use domain: corp.local
-
-Keep DNS + Global Catalog checked
-
-Set DSRM password
-
-
-
-5. Click Install → Reboot
-
-
-
-
----
-
-✅ Validation & Testing
-
-🔹 1. Verify DNS Replication
-
-On DC2 → Open DNS Manager
-
-Check if zones:
-
-yash.local, hamed.local, etc. are visible
-
-
-Open each → Check for test A-record
-
-
-
----
-
-🔹 2. CLI Testing
-
-On DC2, run:
-
-nslookup test.yash.local
-repadmin /replsummary
-
-You should see the test records resolve and successful replication status.
-
-
----
-
-🔹 3. Optional: Test Change from DC2
-
-On DC2:
-
-Add A-record: hello.kushal.local → IP: 10.0.0.99
-
-
-Wait ~30 seconds or run:
-
-repadmin /syncall /AdeP
-
-Go to DC1 → Refresh DNS → Check if hello.kushal.local appears
-
-
-
----
+    # Send email (no authentication)
+    Send-MailMessage -SmtpServer $smtpServer -Port $smtpPort `
+        -From $from -To $to -Subject $subject -Body $body
+}
