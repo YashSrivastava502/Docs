@@ -1,4 +1,4 @@
-# === DNS SETTINGS ===
+# === DOMAIN TO CHECK ===
 $domain = "www.cheapoair.com"
 $expectedName = "e86859.dsca.akamaiedge.net"
 $expectedAliases = @(
@@ -6,19 +6,25 @@ $expectedAliases = @(
     "www.cheapoair.com.edgekey.net"
 )
 
-# === SMTP SETTINGS ===
-$smtpServer = "192.168.1.100"      # Change to your SMTP server IP or hostname
-$smtpPort = 25                     # Port (25 or 587 usually)
-$from = "dns-monitor@corp.local"  # Sender
-$to = "admin@corp.local"          # Recipient
-$subject = "❌ DNS Mismatch for $domain"
+# === SMTP CONFIGURATION (NO LOGIN) ===
+$smtpServer = "192.168.1.100"           # Replace with your SMTP server
+$smtpPort = 25
+$from = "dns-monitor@corp.local"
+$to = "admin@corp.local"
+$subject = "DNS FOR FROM DOMAIN NAME"   # As per your instruction
 
 # === RUN NSLOOKUP ===
-$nslookupOutput = nslookup $domain | Out-String
+try {
+    $nslookupRaw = nslookup $domain 2>&1
+    $nslookupOutput = $nslookupRaw -join "`n"
+} catch {
+    Write-Host "❌ Failed to run nslookup."
+    exit 1
+}
 
 # === PARSE OUTPUT ===
-$nameLine = ($nslookupOutput -split "`n") | Where-Object { $_ -match "^Name:\s+" }
-$aliasLines = ($nslookupOutput -split "`n") | Where-Object { $_ -match "^\s*Aliases?:\s+" -or ($_ -match "^\s{1,}\S+\.\S+") }
+$nameLine = $nslookupRaw | Where-Object { $_ -match "^Name:\s+" }
+$aliasLines = $nslookupRaw | Where-Object { $_ -match "^\s*Aliases?:\s+" -or ($_ -match "^\s{1,}\S+\.\S+") }
 
 $nameValue = $nameLine -replace "^Name:\s+", "" -replace "\s+$", ""
 $aliasesFound = $aliasLines | ForEach-Object { $_.Trim() -replace "^Aliases?:\s+", "" } | Where-Object { $_ -ne "" }
@@ -27,32 +33,13 @@ $aliasesFound = $aliasLines | ForEach-Object { $_.Trim() -replace "^Aliases?:\s+
 $nameMatches = ($nameValue -eq $expectedName)
 $aliasesMatch = ($expectedAliases | Sort-Object) -join "," -eq ($aliasesFound | Sort-Object) -join ","
 
-# === LOGIC ===
-if ($nameMatches -and $aliasesMatch) {
-    Write-Host "✅ DNS matches expected values."
-} else {
-    Write-Host "❌ DNS mismatch detected!"
-    
-    $body = @"
-DNS Mismatch Detected for $domain
+# === SEND EMAIL IF MISMATCH ===
+if (-not ($nameMatches -and $aliasesMatch)) {
+    Write-Host "❌ DNS mismatch! Sending email alert..."
 
-Expected Name:
-$expectedName
-
-Actual Name:
-$nameValue
-
-Expected Aliases:
-$($expectedAliases -join "`n")
-
-Actual Aliases:
-$($aliasesFound -join "`n")
-
-Full nslookup output:
-$nslookupOutput
-"@
-
-    # Send email (no authentication)
+    # Send full nslookup output as body
     Send-MailMessage -SmtpServer $smtpServer -Port $smtpPort `
-        -From $from -To $to -Subject $subject -Body $body
+        -From $from -To $to -Subject $subject -Body $nslookupOutput
+} else {
+    Write-Host "✅ DNS matches expected values. No mail sent."
 }
