@@ -1,39 +1,22 @@
-import csv
-import yaml
+---
+all:
+  children:
+    fortigate:
+      hosts:
+        localhost
+      vars:
+        fortigate_ip: 10.255.255.65
+        uname: "svc_IAC"
+        password1: "{{ lookup('file', './svcIAC.txt') }}"
+        ansible_user: "sysadmin"
+        ansible_password: "{{ lookup('file', './sysadmin.txt') }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-# Input and output files
-input_csv = "fortigate_addresses.csv"   # 🔁 Your CSV file
-output_yaml = "address_objects.yml"     # ✅ Output YAML file
+        comment_string: "ATM Firewall Objects"
+        address_group_name: "ATM-FW-Group"
 
-address_objects = []
+        address_objects:
+          - name: az-atm-address1
+            type: subnet
+            subnet: 4.150.57.203/32
 
-with open(input_csv, "r") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        name = row.get("name", "").strip()
-        type_ = row.get("type", "").strip().lower()
-        subnet_or_fqdn = row.get("subnet", "").strip()
-
-        # Skip rows missing essential fields
-        if not name or not type_ or not subnet_or_fqdn:
-            continue
-
-        obj = {
-            "name": name,
-            "type": type_,
-        }
-
-        if type_ == "subnet":
-            obj["subnet"] = subnet_or_fqdn
-        elif type_ == "fqdn":
-            obj["fqdn"] = subnet_or_fqdn
-        else:
-            continue  # Skip unknown types
-
-        address_objects.append(obj)
-
-# Dump to YAML
-with open(output_yaml, "w") as f:
-    yaml.dump({"address_objects": address_objects}, f, sort_keys=False, default_flow_style=False)
-
-print(f"✅ Converted {len(address_objects)} address objects to {output_yaml}")
