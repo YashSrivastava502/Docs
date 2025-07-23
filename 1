@@ -1,1 +1,19 @@
+trigger: none
 
+schedules:
+- cron: "*/15 * * * *"  # Every 15 minutes
+  displayName: Every 15 mins
+  branches:
+    include:
+      - main
+  always: true
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- task: PowerShell@2
+  displayName: 'Check DNS and Email'
+  inputs:
+    filePath: 'check-dns.ps1'
+    pwsh: true
