@@ -1,1 +1,92 @@
+---
+- name: Configure FortiGate firewall
+  hosts: fortigate
+  gather_facts: no
+  vars_files:
+    - fw_config_li.yml
 
+  tasks:
+
+    - name: Remove old SSH host key
+      command: "ssh-keygen -R {{ ansible_host }}"
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: yes
+
+    - name: Validate Address Objects
+      assert:
+        that:
+          - item.name is defined
+          - item.type is defined
+          - item.type in ['subnet', 'fqdn']
+          - (item.type == 'subnet' and item.subnet is defined) or (item.type == 'fqdn' and item.fqdn is defined)
+        fail_msg: "Invalid address object: {{ item }}"
+      loop: "{{ address_objects }}"
+      delegate_to: localhost
+
+    - name: Create Address Objects on FortiGate
+      expect:
+        command: ssh -o ServerAliveInterval=10 -o ConnectTimeout=30 {{ uname }}@{{ fortigate_ip }}
+        responses:
+          "(?i)password:": "{{ password1 }}"
+          "(?i)continue connecting (yes/no)?": "yes"
+          "Are you sure you want to continue connecting (yes/no/[fingerprint])?": "yes"
+          "(?i)error|failed|invalid|already exists": "end\nend\nexit"
+          "#": |
+            config vdom
+            edit root
+            config firewall address
+            {% for item in address_objects %}
+            edit {{ item.name }}
+            set type {{ item.type }}
+            {% if item.type == 'subnet' %}
+            set subnet {{ item.subnet }}
+            {% elif item.type == 'fqdn' %}
+            set fqdn {{ item.fqdn }}
+            {% endif %}
+            set comment "{{ comment_string }}"
+            next
+            {% endfor %}
+            end
+            end
+            exit
+      delegate_to: localhost
+      no_log: false
+      timeout: 120
+      register: address_output
+
+    - name: Debug Address Output
+      debug:
+        msg: "{{ address_output.stdout }}"
+      when: address_output.stdout is defined
+
+    - name: Create Address Group with all members
+      expect:
+        command: ssh -o ServerAliveInterval=10 -o ConnectTimeout=30 {{ uname }}@{{ fortigate_ip }}
+        responses:
+          "(?i)password:": "{{ password1 }}"
+          "(?i)continue connecting (yes/no)?": "yes"
+          "Are you sure you want to continue connecting (yes/no/[fingerprint])?": "yes"
+          "(?i)error|failed|invalid|already exists": "end\nend\nexit"
+          "#": |
+            config vdom
+            edit root
+            config firewall addrgrp
+            edit {{ address_group_name }}
+            {% for item in address_objects %}
+            append member {{ item.name }}
+            {% endfor %}
+            set comment "{{ comment_string }}"
+            next
+            end
+            end
+            exit
+      delegate_to: localhost
+      no_log: false
+      timeout: 120
+      register: addrgrp_output
+
+    - name: Debug Address Group Output
+      debug:
+        msg: "{{ addrgrp_output.stdout }}"
+      when: addrgrp_output.stdout is defined
