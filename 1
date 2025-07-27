@@ -1,2 +1,79 @@
-register: address_output
-  loop: "{{ address_objects | batch(5) | list }}"
+from playwright.sync_api import sync_playwright
+
+def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+    base_url = "https://portal.azure.com/#@fareportal.com"
+    target_resource = alert.get("targetResource")
+    target_resource_name = alert.get("targetResourceName")
+    severity = alert.get("severity")
+    alert_description = alert.get("name")
+    alert_description_lower = alert_description.lower()
+    print(alert_description_lower)
+    full_url = f"{base_url}/resource{target_resource}"
+
+    screenshot_dir = "alertscreenshots"
+    if not os.path.exists(screenshot_dir):
+        os.makedirs(screenshot_dir)
+    screenshot_filename = os.path.join(screenshot_dir, f"{target_resource_name}.png")
+
+    # Update these paths for your system!
+    user_data_dir = r"C:\Users\<YourUsername>\AppData\Local\Google\Chrome\User Data"
+    profile_name = "Default"  # Or your custom profile name
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                headless=False,
+                args=[f'--profile-directory={profile_name}', '--start-maximized'],
+                viewport=None
+            )
+            page = browser.new_page()
+            page.goto(full_url, wait_until="networkidle")
+            page.wait_for_timeout(8000)  # Wait for page to fully load
+
+            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
+                # Click Failures menu
+                try:
+                    page.wait_for_selector("div[data-telemetryname='Menu-failures']", timeout=10000)
+                    page.click("div[data-telemetryname='Menu-failures']")
+                except Exception as e:
+                    print("Could not click Failures menu:", e)
+
+                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
+                    page.wait_for_timeout(20000)
+                    try:
+                        # Switch to iframe and click Dependencies
+                        frame = page.frame_locator(".fxs-part-frame")
+                        frame.locator("#Dependencies").click()
+                        page.wait_for_timeout(15000)
+                    except Exception as e:
+                        print("Could not click Dependencies:", e)
+                elif "exception" in alert_description_lower:
+                    page.wait_for_timeout(20000)
+                    try:
+                        frame = page.frame_locator(".fxs-part-frame")
+                        frame.locator("#Exceptions").click()
+                        page.wait_for_timeout(15000)
+                    except Exception as e:
+                        print("Could not click Exceptions:", e)
+
+                page.screenshot(path=screenshot_filename, full_page=True)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+
+            else:
+                page.wait_for_timeout(20000)
+                try:
+                    page.wait_for_selector("div[data-telemetryname='Menu-performance']", timeout=10000)
+                    page.click("div[data-telemetryname='Menu-performance']")
+                    page.wait_for_timeout(10000)
+                except Exception as e:
+                    print("Could not click Performance menu:", e)
+
+                page.screenshot(path=screenshot_filename, full_page=True)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+
+            browser.close()
+    except Exception as e:
+        print(f"Error with Playwright: {e}")
