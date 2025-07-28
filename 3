@@ -1,108 +1,69 @@
-Step 1: Back Up All Databases from DB1
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import time
+import appinsight_report_config
 
-sudo -u postgres pg_dumpall -h 10.0.0.4 -p 5432 > /tmp/all_databases.sql
+def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+    base_url = "https://portal.azure.com/#@fareportal.com"
+    target_resource = alert.get("targetResource")
+    target_resource_name = alert.get("targetResourceName")
+    severity = alert.get("severity")
+    alert_description = alert.get("name")
+    alert_description_lower = alert_description.lower()
+    print(alert_description_lower)
+    full_url = f"{base_url}/resource{target_resource}"
 
-Not needed:
-Set up .pgpass for passwordless access (optional but recommended): To avoid password prompts, create a .pgpass file on DB1:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)  # set headless=True if needed
+        context = browser.new_context()
+        page = context.new_page()
 
-echo "10.0.0.4:5432:*:postgres:Yash@0505" | sudo -u postgres tee -a ~postgres/.pgpass
-sudo -u postgres chmod 0600 ~postgres/.pgpass
+        try:
+            page.goto(full_url, timeout=60000)
 
-Verify the backup: Check that /tmp/all_databases.sql exists and is not empty:
+            email = appinsight_report_config.SENDER_EMAIL
+            password = appinsight_report_config.SENDER_PASSWORD
+            sign_in(page, email, password)
 
-ls -lh /tmp/all_databases.sql
+            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
+                failures_menu_locator = "div[data-telemetryname='Menu-failures']"
+                page.wait_for_selector(failures_menu_locator, timeout=10000)
+                page.click(failures_menu_locator)
 
+                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
+                    time.sleep(20)
+                    frame = page.frame_locator("iframe.fxs-part-frame").first
+                    frame.locator("#Dependencies").click()
+                    time.sleep(15)
+                    screenshot_filename = f"screenshots/{target_resource_name}.png"
+                    page.screenshot(path=screenshot_filename, full_page=True)
+                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                    print(f"Alert email sent for {target_resource_name}")
+                    browser.close()
 
-Step 2: Transfer the Backup to DB2
+                elif "exception" in alert_description_lower:
+                    time.sleep(20)
+                    frame = page.frame_locator("iframe.fxs-part-frame").first
+                    frame.locator("#Exceptions").click()
+                    time.sleep(15)
+                    screenshot_filename = f"screenshots/{target_resource_name}.png"
+                    page.screenshot(path=screenshot_filename, full_page=True)
+                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                    print(f"Alert email sent for {target_resource_name}")
+                    browser.close()
 
-Copy the backup file to DB2: From DB1, transfer /tmp/all_databases.sql to DB2 (10.0.0.5):
+            else:
+                time.sleep(20)
+                perf_locator = "div[data-telemetryname='Menu-performance']"
+                page.wait_for_selector(perf_locator, timeout=10000)
+                page.click(perf_locator)
+                time.sleep(10)
+                screenshot_filename = f"screenshots/{target_resource_name}.png"
+                page.screenshot(path=screenshot_filename, full_page=True)
+                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
+                print(f"Alert email sent for {target_resource_name}")
+                browser.close()
 
-scp /tmp/all_databases.sql postgres@10.0.0.5:/tmp/
-
-Verify the file on DB2: On DB2, confirm the file was transferred:
-
-ls -lh /tmp/all_databases.sql
-
-Step 3: Restore the Backup to DB2
-
-Set up .pgpass on DB2 (optional but recommended): To avoid password prompts during restore, create a .pgpass file on DB2:
-sudo -u postgres psql -h 10.0.0.5 -p 5432 -f /tmp/all_databases.sql
-
-Restore the backup using psql: On DB2, restore all databases and global objects:
-sudo -u postgres psql -h 10.0.0.5 -p 5432 -f /tmp/all_databases.sql
-
-
-Verify the restore: List databases on DB2 to confirm they were created
-sudo -u postgres psql -h 10.0.0.5 -p 5432 -l
-
-
-
-Step 4: Configure WAL-Based Streaming Replication
-
-On DB1 (Primary, 10.0.0.4)
-Configure postgresql.conf: Edit the configuration file (e.g., /etc/postgresql/<version>/main/postgresql.conf or /var/lib/pgsql/<version>/data/postgresql.conf):
-
-
-sudo -u postgres nano /etc/postgresql/<version>/main/postgresql.conf
-
-Add or modify:
-wal_level = replica
-archive_mode = on
-archive_command = 'cp %p /var/lib/pgsql/archive/%f'
-max_wal_senders = 10
-wal_keep_size = 256MB
-
-
-Create the archive directory:
-sudo -u postgres mkdir -p /var/lib/pgsql/archive
-sudo -u postgres chmod 700 /var/lib/pgsql/archive
-
-Configure pg_hba.conf: Edit the host-based authentication file:
-
-sudo -u postgres nano /etc/postgresql/<version>/main/pg_hba.conf
-
-Add:
-host replication postgres 10.0.0.5/32 scram-sha-256
-
-Restart PostgreSQL on DB1: Apply changes:
-
-sudo systemctl restart postgresql
-
-
-On DB2 (Standby, 10.0.0.5)
-Stop PostgreSQL:
-sudo systemctl stop postgresql
-
-
-Take a base backup from DB1: Since you’ve restored the databases, you can overwrite DB2’s data directory with a fresh base backup to ensure consistency:
-sudo -u postgres rm -rf /var/lib/pgsql/<version>/data/*
-sudo -u postgres pg_basebackup -h 10.0.0.4 -p 5432 -U postgres -D /var/lib/pgsql/<version>/data/ -Fp --checkpoint=fast -R
-
-
-Configure postgresql.conf on DB2: Edit the configuration file:
-sudo -u postgres nano /var/lib/pgsql/<version>/data/postgresql.conf
-
-
-Add or modify:
-hot_standby = on
-primary_conninfo = 'host=10.0.0.4 port=5432 user=postgres password=Yash@0505'
-
-
-Ensure standby.signal exists: The pg_basebackup -R command should have created /var/lib/pgsql/<version>/data/standby.signal. Verify:
-ls /var/lib/pgsql/<version>/data/standby.signal
-
-Set data directory permissions:
-
-sudo chown -R postgres:postgres /var/lib/pgsql/<version>/data/
-
-Start PostgreSQL on DB2:
-sudo systemctl start postgresql
-
-Step 5: Verify Replication
-Check replication status on DB1:
-sudo -u postgres psql -h 10.0.0.4 -p 5432 -c "SELECT * FROM pg_stat_replication;"
-
-
-Confirm DB2 is in recovery mode
-sudo -u postgres psql -h 10.0.0.5 -p 5432 -c "SELECT pg_is_in_recovery();"
-
+        except PlaywrightTimeoutError:
+            print(f"Timeout occurred while loading {full_url}")
+        finally:
+            browser.close()
