@@ -12,8 +12,14 @@ def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
     print(alert_description_lower)
     full_url = f"{base_url}/resource{target_resource}"
 
+    chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"  # Path to installed Chrome
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # set headless=True if needed
+        browser = p.chromium.launch(
+            executable_path=chrome_path,
+            headless=False,
+            args=["--remote-debugging-port=9222"]
+        )
         context = browser.new_context()
         page = context.new_page()
 
