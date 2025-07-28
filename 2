@@ -1,69 +1,10 @@
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import time
-import appinsight_report_config
-
-def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
-    base_url = "https://portal.azure.com/#@fareportal.com"
-    target_resource = alert.get("targetResource")
-    target_resource_name = alert.get("targetResourceName")
-    severity = alert.get("severity")
-    alert_description = alert.get("name")
-    alert_description_lower = alert_description.lower()
-    print(alert_description_lower)
-    full_url = f"{base_url}/resource{target_resource}"
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # set headless=True if needed
-        context = browser.new_context()
-        page = context.new_page()
-
-        try:
-            page.goto(full_url, timeout=60000)
-
-            email = appinsight_report_config.SENDER_EMAIL
-            password = appinsight_report_config.SENDER_PASSWORD
-            sign_in(page, email, password)
-
-            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
-                failures_menu_locator = "div[data-telemetryname='Menu-failures']"
-                page.wait_for_selector(failures_menu_locator, timeout=10000)
-                page.click(failures_menu_locator)
-
-                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Dependencies").click()
-                    time.sleep(15)
-                    screenshot_filename = f"screenshots/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-                    browser.close()
-
-                elif "exception" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Exceptions").click()
-                    time.sleep(15)
-                    screenshot_filename = f"screenshots/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-                    browser.close()
-
-            else:
-                time.sleep(20)
-                perf_locator = "div[data-telemetryname='Menu-performance']"
-                page.wait_for_selector(perf_locator, timeout=10000)
-                page.click(perf_locator)
-                time.sleep(10)
-                screenshot_filename = f"screenshots/{target_resource_name}.png"
-                page.screenshot(path=screenshot_filename, full_page=True)
-                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                print(f"Alert email sent for {target_resource_name}")
-                browser.close()
-
-        except PlaywrightTimeoutError:
-            print(f"Timeout occurred while loading {full_url}")
-        finally:
-            browser.close()
+Install-ADDSDomainController `
+  -DomainName "corptest.local" `
+  -Credential (Get-Credential) `
+  -SiteName "Default-First-Site-Name" `
+  -InstallDNS `
+  -NoGlobalCatalog:$false `
+  -DatabasePath "C:\Windows\NTDS" `
+  -LogPath "C:\Windows\NTDS" `
+  -SYSVOLPath "C:\Windows\SYSVOL" `
+  -Force:$true
