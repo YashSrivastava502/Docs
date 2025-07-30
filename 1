@@ -1,22 +1,147 @@
-def sign_in(page, email, password):
-    try:
-        # Enter Email
-        page.wait_for_selector("input#i0116", timeout=15000)
-        page.fill("input#i0116", email)
-        page.click("input#idSIButton9")
+Here's the complete plan for your DC failover and DNS fallback automation, including all phases, requirements, design decisions, and scripting strategies — broken down clearly and step-by-step.
 
-        # Enter Password
-        page.wait_for_selector("input#i0118", timeout=15000)
-        page.fill("input#i0118", password)
-        page.click("input#idSIButton9")
 
-        # Stay signed in popup
-        try:
-            page.wait_for_selector("//div[contains(text(), 'Stay signed in?')]", timeout=10000)
-            no_button = page.locator("input[value='No']")
-            no_button.click()
-        except PlaywrightTimeoutError:
-            pass  # If popup doesn't appear, skip
+---
 
-    except PlaywrightTimeoutError:
-        print("Login process failed due to timeout.")
+✅ Project Goal
+
+To automate the DNS fallback plan between DC1 (primary, on-prem) and DC2 (secondary, cloud) during a connectivity break — by:
+
+Taking backup of existing A records.
+
+Replacing them with CNAMEs pointing to DR IPs.
+
+Restoring original A records once DC1 is back online.
+
+
+
+---
+
+📋 Initial Requirements
+
+1. Two Domain Controllers (DC1, DC2) in sync before disconnection.
+
+
+2. DNS Zones (e.g., abc.com.local, xyz.com.local) replicated across DC1 and DC2.
+
+
+3. A CSV file (records.csv) in DC2 listing fallback names and IPs:
+
+Name,IP
+abc,10.20.30.40
+xyz,50.60.70.80
+
+
+4. After disconnection:
+
+Delete original A records (abc, xyz).
+
+Create new A records: abc-dr, xyz-dr.
+
+Create CNAMEs:
+
+abc → abc-dr
+
+xyz → xyz-dr
+
+
+
+
+5. Once DC1 is back online, remove CNAMEs and recreate original A records.
+
+
+6. Connectivity/infrastructure checks (e.g., DC1 online or not).
+
+
+
+
+---
+
+🧠 Phased Plan
+
+### 🔵 Phase 0: Backup Original A Records
+
+Export A records (abc, xyz, etc.) from DNS zones to original_records_backup.csv
+
+Used later for regeneration.
+
+
+### 🟢 Phase 1: Create DR A Records & CNAMEs
+
+From records.csv, create A records:
+
+abc-dr, xyz-dr → DR IPs
+
+
+Create CNAMEs:
+
+abc → abc-dr
+
+xyz → xyz-dr
+
+
+
+### 🔴 Phase 2: Restore Original State (After DC1 Is Up)
+
+Delete CNAMEs (abc, xyz)
+
+Restore original A records from original_records_backup.csv
+
+
+### 🟠 Phase Infra: Infra Check Script
+
+Ping DC1 to see if it's reachable.
+
+Optionally: check port 53/LDAP to confirm AD/DC status.
+
+
+
+---
+
+💻 Script Execution Design
+
+Use one PowerShell script with parameters to run each phase, e.g.:
+
+.\dnsFailover.ps1 -Phase Backup
+.\dnsFailover.ps1 -Phase Failover
+.\dnsFailover.ps1 -Phase Restore
+.\dnsFailover.ps1 -Phase InfraCheck
+
+
+---
+
+🛠️ Directory Structure
+
+📁 DNSFailoverScript
+├── dnsFailover.ps1             # Main script
+├── records.csv                 # New fallback records
+└── original_records_backup.csv # Auto-generated during backup
+
+
+---
+
+🧪 Sample Infra Check Output
+
+Checking connectivity to DC1 (dc1.corp.local)...
+✅ Ping success.
+✅ Port 53 open (DNS reachable)
+❌ Port 389 not reachable (LDAP might be down)
+
+Result: Partial connectivity to DC1
+
+
+---
+
+🔐 Security Notes
+
+Use signed scripts or run under a service account with DNS modification rights.
+
+Test on non-production zones first.
+
+
+
+---
+
+🚀 Next Step
+
+Would you like me to deliver the full PowerShell script with all these phases, logging, and switches in a single file (dnsFailover.ps1)?
