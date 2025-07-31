@@ -1,1 +1,35 @@
+$dc1 = "usel-pr-dc1"
+$dnsServer = $env:COMPUTERNAME
+$backupPath = "C:\Scripts\original-records.csv"
 
+# Check if DC1 is reachable
+if (Test-Connection -ComputerName $dc1 -Count 2 -Quiet) {
+    Write-Host "DC1 is reachable. Running Fallback Mode..."
+
+    # Step 1: Delete CNAMEs from all zones
+    $zones = Get-DnsServerZone
+    foreach ($zone in $zones) {
+        $cnameRecords = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType CName -ErrorAction SilentlyContinue
+        foreach ($cname in $cnameRecords) {
+            Remove-DnsServerResourceRecord -ZoneName $zone.ZoneName -Name $cname.HostName -RRType CName -Force
+        }
+    }
+
+    # Step 2: Restore A Records
+    $originals = Import-Csv $backupPath
+    foreach ($rec in $originals) {
+        try {
+            # Check if record already exists
+            $existing = Get-DnsServerResourceRecord -ZoneName $rec.Zone -Name $rec.Name -ErrorAction SilentlyContinue
+            if (-not $existing) {
+                Add-DnsServerResourceRecordA -Name $rec.Name -ZoneName $rec.Zone -IPv4Address $rec.IP
+            }
+        } catch {
+            Write-Warning "Error restoring A record $($rec.Name) in $($rec.Zone): $_"
+        }
+    }
+
+    Write-Host "Original A records restored and CNAMEs removed."
+} else {
+    Write-Host "DC1 is still unreachable. Fallback mode skipped."
+}
