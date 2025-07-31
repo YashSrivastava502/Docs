@@ -1,75 +1,41 @@
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import time
-import appinsight_report_config
+# Input CSV Path
+$csvPath = "C:\Scripts\dr_records.csv"
 
-def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
-    base_url = "https://portal.azure.com/#@fareportal.com"
-    target_resource = alert.get("targetResource")
-    target_resource_name = alert.get("targetResourceName")
-    severity = alert.get("severity")
-    alert_description = alert.get("name")
-    alert_description_lower = alert_description.lower()
-    print(alert_description_lower)
-    full_url = f"{base_url}/resource{target_resource}"
+# Import records
+$records = Import-Csv -Path $csvPath
 
-    chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"  # Path to installed Chrome
+foreach ($record in $records) {
+    $zone = $record.Zone
+    $originalName = $record.Name
+    $drName = "$originalName-dr"
+    $ip = $record.IP
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            executable_path=chrome_path,
-            headless=False,
-            args=["--remote-debugging-port=9222"]
-        )
-        context = browser.new_context()
-        page = context.new_page()
+    Write-Host "Processing zone: $zone, original: $originalName, DR IP: $ip"
 
-        try:
-            page.goto(full_url, timeout=60000)
+    # Step 1: Delete Original A Record (if exists)
+    $aRecord = Get-DnsServerResourceRecord -ZoneName $zone -Name $originalName -ErrorAction SilentlyContinue | Where-Object { $_.RecordType -eq "A" }
+    if ($aRecord) {
+        Write-Host "Deleting original A record: $originalName.$zone"
+        Remove-DnsServerResourceRecord -ZoneName $zone -RRType "A" -Name $originalName -RecordData $aRecord.RecordData.IPv4Address -Force
+    } else {
+        Write-Host "No existing A record found for $originalName.$zone"
+    }
 
-            email = appinsight_report_config.SENDER_EMAIL
-            password = appinsight_report_config.SENDER_PASSWORD
-            sign_in(page, email, password)
+    # Step 2: Create DR A Record (e.g., abc-dr)
+    Write-Host "Creating DR A record: $drName.$zone with IP $ip"
+    Add-DnsServerResourceRecordA -Name $drName -ZoneName $zone -IPv4Address $ip
 
-            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
-                failures_menu_locator = "div[data-telemetryname='Menu-failures']"
-                page.wait_for_selector(failures_menu_locator, timeout=10000)
-                page.click(failures_menu_locator)
+    # Step 3: Create CNAME: original → DR
+    Write-Host "Creating CNAME: $originalName -> $drName"
+    Add-DnsServerResourceRecordCName -Name $originalName -ZoneName $zone -HostNameAlias "$drName.$zone"
+}
 
-                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Dependencies").click()
-                    time.sleep(15)
-                    screenshot_filename = f"screenshots/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-                    browser.close()
 
-                elif "exception" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Exceptions").click()
-                    time.sleep(15)
-                    screenshot_filename = f"screenshots/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-                    browser.close()
+dr_records.csv
+Name,IP,Zone
+abc,10.1.1.101,yash.local
+xyz,10.1.1.102,hamed.local
+pqr,10.1.1.103,aryaman.local
 
-            else:
-                time.sleep(20)
-                perf_locator = "div[data-telemetryname='Menu-performance']"
-                page.wait_for_selector(perf_locator, timeout=10000)
-                page.click(perf_locator)
-                time.sleep(10)
-                screenshot_filename = f"screenshots/{target_resource_name}.png"
-                page.screenshot(path=screenshot_filename, full_page=True)
-                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                print(f"Alert email sent for {target_resource_name}")
-                browser.close()
+.\Create-DR-DNSRecords.ps1
 
-        except PlaywrightTimeoutError:
-            print(f"Timeout occurred while loading {full_url}")
-        finally:
-            browser.close()
