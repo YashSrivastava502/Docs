@@ -1,26 +1,13 @@
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import time
-import appinsight_report_config
+from playwright.sync_api import sync_playwright
 import os
+import time
 
-def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+def process_alert(...):  # your parameters
     base_url = "https://portal.azure.com/#@fareportal.com"
-    target_resource = alert.get("targetResource")
-    target_resource_name = alert.get("targetResourceName")
-    severity = alert.get("severity")
-    alert_description = alert.get("name")
-    alert_description_lower = alert_description.lower()
-    print(alert_description_lower)
-    full_url = f"{base_url}/resource{target_resource}"
+    full_url = f"{base_url}/resource{alert.get('targetResource')}"
 
-    # ✅ Path to Chrome executable
     chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"
-
-    # ✅ Use a persistent user data directory (must exist and already signed in)
-    user_data_dir = "C:/Users/YOUR_USERNAME/AppData/Local/Google/Chrome/User Data"
-
-    screenshots_dir = "screenshots"
-    os.makedirs(screenshots_dir, exist_ok=True)
+    user_data_dir = "C:/Users/Yash/AppData/Local/Google/Chrome/User Data"  # Adjust this to your path
 
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
@@ -29,48 +16,17 @@ def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
             headless=False,
             args=["--remote-debugging-port=9222"]
         )
-        page = browser.pages[0] if browser.pages else browser.new_page()
+
+        page = browser.new_page()
 
         try:
+            print("Opening:", full_url)
             page.goto(full_url, timeout=60000)
 
-            if "failed" in alert_description_lower or "failure" in alert_description_lower or "failures" in alert_description_lower:
-                failures_menu_locator = "div[data-telemetryname='Menu-failures']"
-                page.wait_for_selector(failures_menu_locator, timeout=10000)
-                page.click(failures_menu_locator)
+            # Now you're signed in, continue with your logic
+            # e.g., check for "failures", take screenshot, etc.
 
-                if "dependency" in alert_description_lower or "dapendency" in alert_description_lower or "dependency failure" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Dependencies").click()
-                    time.sleep(15)
-                    screenshot_filename = f"{screenshots_dir}/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-
-                elif "exception" in alert_description_lower:
-                    time.sleep(20)
-                    frame = page.frame_locator("iframe.fxs-part-frame").first
-                    frame.locator("#Exceptions").click()
-                    time.sleep(15)
-                    screenshot_filename = f"{screenshots_dir}/{target_resource_name}.png"
-                    page.screenshot(path=screenshot_filename, full_page=True)
-                    send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                    print(f"Alert email sent for {target_resource_name}")
-
-            else:
-                time.sleep(20)
-                perf_locator = "div[data-telemetryname='Menu-performance']"
-                page.wait_for_selector(perf_locator, timeout=10000)
-                page.click(perf_locator)
-                time.sleep(10)
-                screenshot_filename = f"{screenshots_dir}/{target_resource_name}.png"
-                page.screenshot(path=screenshot_filename, full_page=True)
-                send_email(target_resource_name, owner_email, screenshot_filename, severity, alert_description, cc_email)
-                print(f"Alert email sent for {target_resource_name}")
-
-        except PlaywrightTimeoutError:
-            print(f"Timeout occurred while loading {full_url}")
+        except Exception as e:
+            print("Error:", e)
         finally:
             browser.close()
