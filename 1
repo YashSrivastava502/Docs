@@ -30,3 +30,16 @@ def process_alert(...):  # your parameters
             print("Error:", e)
         finally:
             browser.close()
+
+
+
+Install-ADDSDomainController `
+  -DomainName "fptest.com.local" `
+  -Credential (Get-Credential) `
+  -InstallDns `
+  -NoGlobalCatalog:$false `
+  -SiteName "Default-First-Site-Name" `
+  -DatabasePath "C:\Windows\NTDS" `
+  -LogPath "C:\Windows\NTDS" `
+  -SysvolPath "C:\Windows\SYSVOL" `
+  -Force:$true
