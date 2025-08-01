@@ -1,45 +1,178 @@
-from playwright.sync_api import sync_playwright
-import os
-import time
-
-def process_alert(...):  # your parameters
-    base_url = "https://portal.azure.com/#@fareportal.com"
-    full_url = f"{base_url}/resource{alert.get('targetResource')}"
-
-    chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"
-    user_data_dir = "C:/Users/Yash/AppData/Local/Google/Chrome/User Data"  # Adjust this to your path
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            executable_path=chrome_path,
-            headless=False,
-            args=["--remote-debugging-port=9222"]
-        )
-
-        page = browser.new_page()
-
-        try:
-            print("Opening:", full_url)
-            page.goto(full_url, timeout=60000)
-
-            # Now you're signed in, continue with your logic
-            # e.g., check for "failures", take screenshot, etc.
-
-        except Exception as e:
-            print("Error:", e)
-        finally:
-            browser.close()
+DNS Failover & Fallback Automation - POC Report
 
 
+---
 
-Install-ADDSDomainController `
-  -DomainName "fptest.com.local" `
-  -Credential (Get-Credential) `
-  -InstallDns `
-  -NoGlobalCatalog:$false `
-  -SiteName "Default-First-Site-Name" `
-  -DatabasePath "C:\Windows\NTDS" `
-  -LogPath "C:\Windows\NTDS" `
-  -SysvolPath "C:\Windows\SYSVOL" `
-  -Force:$true
+1. Project Title
+
+Automated DNS Failover and Fallback for Domain Controller Connectivity
+
+
+---
+
+2. Overview
+
+This document provides a detailed report on the implementation and validation of an automated DNS failover and fallback mechanism in a dual Domain Controller (DC) environment. The aim of the POC is to ensure DNS availability and continuity even in the event of a network outage or disconnection from the primary Domain Controller.
+
+
+---
+
+3. Infrastructure Setup
+
+3.1 Domain Controllers:
+
+DC1 (On-Premises)
+
+Hostname: use1-dr-fp-com-local
+
+Domain: fptest.com.local
+
+Role: Primary Domain Controller with Global Catalog
+
+Configured with 4 DNS Zones:
+
+yash.local
+
+hamed.local
+
+aryaman.local
+
+kushal.local
+
+
+
+DC2 (Cloud-based replica)
+
+Hostname: use1-dr-fp-com-local-repl
+
+Role: Secondary Domain Controller with Global Catalog
+
+Replicates all zones from DC1
+
+
+
+3.2 Zones and Records:
+
+Each zone includes a set of test A records (e.g., abc.yash.local, xyz.hamed.local)
+
+DNS replication occurs between DC1 and DC2
+
+
+
+---
+
+4. Failover Strategy (Planned)
+
+4.1 Goal:
+
+To maintain DNS resolution capability when DC1 becomes unreachable by switching to DR A records and associated CNAMEs on DC2.
+
+4.2 Workflow:
+
+1. Detect DC1 connectivity failure via ping or script
+
+
+2. Backup current A records from all zones on DC2 into a CSV
+
+
+3. Delete existing A and CNAME records (except SOA/NS)
+
+
+4. Use a predefined CSV (records.csv) to:
+
+Create DR A records (e.g., abc-dr.yash.local)
+
+Create CNAMEs (e.g., abc.yash.local pointing to abc-dr.yash.local)
+
+
+
+
+4.3 CSV Format (records.csv):
+
+Name,IP,Zone
+abc,10.1.2.3,yash.local
+xyz,10.1.2.4,hamed.local
+
+
+---
+
+5. Fallback Strategy (Planned)
+
+5.1 Goal:
+
+To revert DNS configuration back to its original state when DC1 is back online.
+
+5.2 Workflow:
+
+1. Detect DC1 connectivity restored
+
+
+2. Delete all *-dr A records and their CNAMEs
+
+
+3. Restore original A records from backup CSV
+
+
+
+
+---
+
+6. Automation Scripts
+
+PowerShell scripts were developed for both failover and fallback scenarios
+
+Modular design with clear logging and zone-wise handling
+
+Scripts run locally on DC2
+
+
+
+---
+
+7. Testing
+
+7.1 Test Environment:
+
+Two Windows Server 2022 VMs
+
+One on-premises and one in Azure VNet (DC1 and DC2)
+
+
+7.2 Test Cases Executed:
+
+Test Case	Description	Expected Result	Status
+
+DC1 Failure Simulation	Disabled NIC on DC1	DR records created, CNAMEs in place	Passed
+DNS Resolution Test	Query abc.yash.local from client	Resolves to abc-dr	Passed
+Fallback Simulation	Re-enable NIC on DC1	CNAMEs deleted, original A records restored	Passed
+Final DNS Check	Validate zones on DC1/DC2	All original records present	Passed
+
+
+
+---
+
+8. Outcome
+
+✅ High Availability of DNS during outages
+
+✅ Zero manual intervention for failover/fallback
+
+✅ Fully automated record handling
+
+✅ Safe, secure, and reversible DNS management
+
+
+
+---
+
+9. Next Steps / Recommendations
+
+Integrate notification system (email alerts)
+
+Add error handling & logging to Event Viewer
+
+Schedule scripts via Task Scheduler or Azure Automation
+
+Include partial zone support in next version
+
+
