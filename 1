@@ -1,22 +1,20 @@
 from playwright.sync_api import sync_playwright
 
-chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"
 user_data_dir = "C:/Users/y.s.va22/AppData/Local/Google/Chrome/User Data"
 
 with sync_playwright() as p:
     browser = p.chromium.launch_persistent_context(
         user_data_dir=user_data_dir,
-        executable_path=chrome_path,
         headless=False,
         args=["--remote-debugging-port=9222"]
     )
-    
+
     page = browser.pages[0] if browser.pages else browser.new_page()
 
     try:
         print("Opening Azure portal...")
         page.goto("https://portal.azure.com/", timeout=60000)
-        print("Current URL:", page.url)
+        print("Page URL:", page.url)
         page.wait_for_timeout(15000)
     except Exception as e:
         print("Error:", e)
