@@ -1,20 +1,31 @@
-from playwright.sync_api import sync_playwright
 
-user_data_dir = "C:/Users/y.s.va22/AppData/Local/Google/Chrome/User Data"
-user_profile = "Default"  # Change to "Profile 1" if needed
 
-with sync_playwright() as p:
-    browser = p.chromium.launch_persistent_context(
-        user_data_dir=user_data_dir,
-        headless=False,
-        args=[f'--profile-directory={user_profile}']
-    )
+Date: 06/08/2025
 
-    page = browser.pages[0] if browser.pages else browser.new_page()
+This Week:
 
-    try:
-        page.goto("https://portal.azure.com", timeout=60000)
-        page.wait_for_timeout(15000)
-        print("Current page URL:", page.url)
-    finally:
-        browser.close()
+1. Concluded the Application Insights automation using the Playwright library; determined that it does not work as expected compared to Selenium.
+
+
+2. Destroyed unused/test infrastructure in the DR resource group to optimize resources.
+
+
+3. Created a new domain controller fptest.local and its replica for testing purposes in the DR environment.
+
+
+4. Tested all use cases of the domain controller, including failover and fallback scenarios.
+
+
+5. Documented all the steps involved in the Domain Controller setup/configuration POC.
+
+
+
+Next Week:
+
+1. Will work on the requirement to create a VM from a snapshot of another VM (configured as an NGINX web server) and verify if the web page is accessible via the IP of the new VM.
+
+
+2. Will collaborate with Aryaman on the PMTA POC requirement.
+
+
+3. Will start working on the new DR requirements.
