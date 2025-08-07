@@ -1,1 +1,5 @@
+# Revoke SAS access
+az snapshot revoke-access -g usei-dr-rgp01 -n use1-dr-websrv01-snapshot
 
+# Then delete
+az snapshot delete -g usei-dr-rgp01 -n use1-dr-websrv01-snapshot
