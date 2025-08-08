@@ -1,1 +1,181 @@
+#!/bin/bash
 
+# Step 0: Configuration
+RG="usei-dr-rgp01"
+LOCATION="East US"
+
+VM1_NAME="use1-dr-websrv01-vm"
+VM2_NAME="use1-dr-websrv02-vm"
+
+VNET1="usel-drd-fp-inf-net01"
+SUBNET1="usel-dr01-fp-srv-snet01"
+
+VNET2="use1-drd-fp-hub-net01"
+SUBNET2="usel-drd-fp-hub-srv-snet01"
+
+VM_SIZE="Standard_B1s"
+USERNAME="azureuser"
+PASSWORD="YourStrongPassword123!"
+
+SNAPSHOT_NAME="use1-dr-websrv01-snapshot"
+DISK_NAME="use1-dr-websrv01-clone-disk"
+
+STORAGE_ACCOUNT="fpinfbackup"
+CONTAINER="syseng"
+BLOB_PATH="use1-dr-vm-snapshots/use1-dr-websrv01-osdisk.vhd"
+
+# SAS token (without '?')
+SAS_TOKEN="sp=racwl&st=2025-08-08T06:34:10Z&se=2025-08-11T14:49:10Z&spr=https&sv=2024-11-04&sr=c&sig=aYFoA023qqy6nVe%2B1DuzTNpaQBZy1PuCUSV08KLCZVw%3D"
+
+# Step 1: Create Source VM
+echo "Creating VM1 ($VM1_NAME)..."
+az vm create \
+  --resource-group "$RG" \
+  --name "$VM1_NAME" \
+  --image Ubuntu2204 \
+  --size "$VM_SIZE" \
+  --admin-username "$USERNAME" \
+  --admin-password "$PASSWORD" \
+  --vnet-name "$VNET1" \
+  --subnet "$SUBNET1" \
+  --public-ip-address "" \
+  --location "$LOCATION" \
+  --nsg "${VM1_NAME}-nsg" \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to create VM1 ($VM1_NAME)."
+  exit 1
+fi
+
+# Step 2: Install NGINX + Blue Page
+echo "Installing NGINX on $VM1_NAME..."
+az vm extension set \
+  --resource-group "$RG" \
+  --vm-name "$VM1_NAME" \
+  --name CustomScript \
+  --publisher Microsoft.Azure.Extensions \
+  --settings '{"commandToExecute":"sudo apt update && sudo apt install -y nginx && echo \"<html><body style='\''background-color:blue;'\''><h1>Blue Page</h1></body></html>\" | sudo tee /var/www/html/index.html && sudo systemctl restart nginx"}' \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to install NGINX on $VM1_NAME."
+  exit 1
+fi
+
+# Step 3: Deallocate + Snapshot
+echo "Stopping VM before snapshot..."
+az vm deallocate --resource-group "$RG" --name "$VM1_NAME" --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to deallocate VM1 ($VM1_NAME)."
+  exit 1
+fi
+
+OSDISK_NAME=$(az vm show --resource-group "$RG" --name "$VM1_NAME" --query "storageProfile.osDisk.name" -o tsv)
+
+if [ -z "$OSDISK_NAME" ]; then
+  echo "Error: Failed to retrieve OS disk name for $VM1_NAME."
+  exit 1
+fi
+
+echo "Creating snapshot..."
+az snapshot create \
+  --resource-group "$RG" \
+  --source "$OSDISK_NAME" \
+  --name "$SNAPSHOT_NAME" \
+  --location "$LOCATION" \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to create snapshot ($SNAPSHOT_NAME)."
+  exit 1
+fi
+
+# Step 4: Copy Snapshot to Blob
+echo "Generating snapshot SAS URL..."
+SAS_URL=$(az snapshot grant-access \
+  --name "$SNAPSHOT_NAME" \
+  --resource-group "$RG" \
+  --duration-in-seconds 14400 \
+  --query accessSas \
+  -o tsv)
+
+if [ -z "$SAS_URL" ]; then
+  echo "Error: Failed to generate SAS URL for snapshot ($SNAPSHOT_NAME)."
+  exit 1
+fi
+
+echo "Snapshot SAS URL: $SAS_URL"
+echo "Copying snapshot to blob path: $CONTAINER/$BLOB_PATH ..."
+az storage blob copy start \
+  --account-name "$STORAGE_ACCOUNT" \
+  --destination-container "$CONTAINER" \
+  --destination-blob "$BLOB_PATH" \
+  --source-uri "$SAS_URL" \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to start blob copy operation."
+  exit 1
+fi
+
+echo "Waiting for blob copy to complete..."
+while true; do
+  STATUS=$(az storage blob show \
+    --account-name "$STORAGE_ACCOUNT" \
+    --container-name "$CONTAINER" \
+    --name "$BLOB_PATH" \
+    --sas-token "$SAS_TOKEN" \
+    --query "properties.copy.status" -o tsv 2>/dev/null)
+  if [ "$STATUS" == "success" ]; then
+    echo "Copy status: $STATUS"
+    break
+  elif [ "$STATUS" == "failed" ]; then
+    echo "Error: Blob copy failed."
+    exit 1
+  else
+    echo "Copy status: $STATUS"
+    sleep 30
+  fi
+done
+
+# Step 5: Create Managed Disk from Blob
+BLOB_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/${BLOB_PATH}?${SAS_TOKEN}"
+echo "Creating managed disk from blob..."
+az disk create \
+  --resource-group "$RG" \
+  --name "$DISK_NAME" \
+  --source "$BLOB_URL" \
+  --os-type Linux \
+  --location "$LOCATION" \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to create managed disk ($DISK_NAME)."
+  exit 1
+fi
+
+# Step 6: Create VM2
+echo "Creating VM2 ($VM2_NAME) from cloned disk..."
+az vm create \
+  --resource-group "$RG" \
+  --name "$VM2_NAME" \
+  --attach-os-disk "$DISK_NAME" \
+  --os-type Linux \
+  --size "$VM_SIZE" \
+  --vnet-name "$VNET2" \
+  --subnet "$SUBNET2" \
+  --admin-username "$USERNAME" \
+  --admin-password "$PASSWORD" \
+  --public-ip-address "" \
+  --location "$LOCATION" \
+  --nsg "${VM2_NAME}-nsg" \
+  --output none
+
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to create VM2 ($VM2_NAME)."
+  exit 1
+fi
+
+echo "VMs created successfully with no Public IPs."
