@@ -1,1 +1,16 @@
+When you logged into Kibana, the message "49 of 823 shards failed" meant that some Elasticsearch data shards didn’t respond successfully to Kibana’s query.
+
+It usually happens due to temporary issues like:
+
+Cluster being busy or under load
+
+A node briefly unavailable
+
+Shards being moved or recovered
+
+Query timeout
+
+
+When you refreshed, the issue disappeared because those shards responded properly the second time. It was likely a short-lived cluster hiccup, not a permanent failure.
+
 
