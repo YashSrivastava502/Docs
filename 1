@@ -1,1 +1,114 @@
+#!/bin/bash
+set -e
 
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+RESOURCE_GROUP="usei-dr-rgp01"
+
+# VM1 details
+VM1_NAME="use1-dr-websrv01-vm"
+VNET1="usel-drd-fp-inf-net01"
+SUBNET1="usel-dr01-fp-srv-snet01"
+
+# VM2 details
+VM2_NAME="use1-dr-websrv02-vm"
+VNET2="use1-drd-fp-hub-net01"
+SUBNET2="usel-drd-fp-hub-srv-snet01"
+
+# Common settings
+IMAGE="Ubuntu2404"
+SIZE="Standard_B1s"
+LOCATION="eastus"
+STORAGE_ACCOUNT="fpinfbackup"
+CONTAINER="syseng"
+SAS_TOKEN="?<your_sas_token_here>"  # Replace with your SAS token
+
+# -------------------------------
+# STEP 1: CREATE VM1 (NO PUBLIC IP)
+# -------------------------------
+echo "Creating VM1: $VM1_NAME ..."
+az vm create \
+  --resource-group $RESOURCE_GROUP \
+  --name $VM1_NAME \
+  --image $IMAGE \
+  --size $SIZE \
+  --vnet-name $VNET1 \
+  --subnet $SUBNET1 \
+  --public-ip-address "" \
+  --admin-username azureuser \
+  --generate-ssh-keys
+
+# -------------------------------
+# STEP 2: INSTALL NGINX & BLUE PAGE
+# -------------------------------
+echo "Installing Nginx and blue page..."
+az vm run-command invoke \
+  --resource-group $RESOURCE_GROUP \
+  --name $VM1_NAME \
+  --command-id RunShellScript \
+  --scripts "
+    sudo apt update -y &&
+    sudo apt install nginx -y &&
+    echo '<html><body style=\"background-color:blue;\"><h1>Blue Page</h1></body></html>' | sudo tee /var/www/html/index.html
+    sudo systemctl restart nginx
+  "
+
+# -------------------------------
+# STEP 3: CREATE SNAPSHOT OF VM1
+# -------------------------------
+OS_DISK_ID=$(az vm show --resource-group $RESOURCE_GROUP --name $VM1_NAME --query "storageProfile.osDisk.managedDisk.id" -o tsv)
+SNAPSHOT_NAME="${VM1_NAME}-snap"
+
+echo "Creating snapshot: $SNAPSHOT_NAME ..."
+az snapshot create \
+  --resource-group $RESOURCE_GROUP \
+  --name $SNAPSHOT_NAME \
+  --source $OS_DISK_ID \
+  --location $LOCATION
+
+# -------------------------------
+# STEP 4: COPY SNAPSHOT TO BLOB
+# -------------------------------
+SAS_URL=$(az snapshot grant-access \
+  --resource-group $RESOURCE_GROUP \
+  --name $SNAPSHOT_NAME \
+  --duration-in-seconds 3600 \
+  --query "accessSas" -o tsv)
+
+DEST_BLOB_PATH="${VM1_NAME}/${VM1_NAME}-osdisk.vhd"
+
+echo "Copying snapshot VHD to Blob Storage..."
+az storage blob copy start \
+  --account-name $STORAGE_ACCOUNT \
+  --container-name $CONTAINER \
+  --destination-blob "$DEST_BLOB_PATH" \
+  --source-uri "$SAS_URL" \
+  --sas-token "$SAS_TOKEN"
+
+# -------------------------------
+# STEP 5: CREATE VM2 FROM SNAPSHOT
+# -------------------------------
+echo "Creating managed disk from snapshot..."
+DISK2_NAME="${VM2_NAME}-osdisk"
+
+az disk create \
+  --resource-group $RESOURCE_GROUP \
+  --name $DISK2_NAME \
+  --source $SNAPSHOT_NAME \
+  --location $LOCATION
+
+echo "Creating VM2: $VM2_NAME ..."
+az vm create \
+  --resource-group $RESOURCE_GROUP \
+  --name $VM2_NAME \
+  --attach-os-disk $DISK2_NAME \
+  --os-type linux \
+  --vnet-name $VNET2 \
+  --subnet $SUBNET2 \
+  --size $SIZE \
+  --public-ip-address "" \
+  --admin-username azureuser \
+  --generate-ssh-keys
+
+echo "✅ Both VMs created without public IP. VM2 is from snapshot of VM1."
