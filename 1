@@ -1,114 +1,141 @@
 #!/bin/bash
-set -e
 
-# -------------------------------
-# CONFIGURATION
-# -------------------------------
-RESOURCE_GROUP="usei-dr-rgp01"
+# ------------------ 🔧 CONFIGURATION ---------------------
+RG="usei-dr-rgp01"
+LOCATION="East US"
 
-# VM1 details
+# VM1 - Source
 VM1_NAME="use1-dr-websrv01-vm"
 VNET1="usel-drd-fp-inf-net01"
 SUBNET1="usel-dr01-fp-srv-snet01"
 
-# VM2 details
+# VM2 - Destination
 VM2_NAME="use1-dr-websrv02-vm"
 VNET2="use1-drd-fp-hub-net01"
 SUBNET2="usel-drd-fp-hub-srv-snet01"
 
-# Common settings
-IMAGE="Ubuntu2404"
-SIZE="Standard_B1s"
-LOCATION="eastus"
+# VM config
+VM_SIZE="Standard_B1s"
+USERNAME="azureuser"
+PASSWORD="YourStrongPassword123!"
+
+# Snapshot / Storage
+SNAPSHOT_NAME="use1-dr-websrv01-snapshot"
+DISK_NAME="use1-dr-websrv01-clone-disk"
 STORAGE_ACCOUNT="fpinfbackup"
 CONTAINER="syseng"
-SAS_TOKEN="?<your_sas_token_here>"  # Replace with your SAS token
+BLOB_PATH="use1-dr-websrv01-vm/use1-dr-websrv01-osdisk.vhd"
 
-# -------------------------------
-# STEP 1: CREATE VM1 (NO PUBLIC IP)
-# -------------------------------
-echo "Creating VM1: $VM1_NAME ..."
+# SAS Token (no leading '?')
+SAS_TOKEN="PASTE_YOUR_SAS_TOKEN_HERE"
+
+# ------------------ STEP 0: Ensure Container Exists ---------------------
+echo "📁 Checking/creating container '$CONTAINER'..."
+az storage container create \
+  --account-name "$STORAGE_ACCOUNT" \
+  --name "$CONTAINER" \
+  --sas-token "$SAS_TOKEN" \
+  --public-access off 1>/dev/null
+
+# ------------------ STEP 1: Create Source VM ---------------------
+echo "🖥️ Creating VM1 ($VM1_NAME)..."
 az vm create \
-  --resource-group $RESOURCE_GROUP \
-  --name $VM1_NAME \
-  --image $IMAGE \
-  --size $SIZE \
-  --vnet-name $VNET1 \
-  --subnet $SUBNET1 \
+  --resource-group "$RG" \
+  --name "$VM1_NAME" \
+  --image Ubuntu2204 \
+  --size "$VM_SIZE" \
+  --admin-username "$USERNAME" \
+  --admin-password "$PASSWORD" \
+  --vnet-name "$VNET1" \
+  --subnet "$SUBNET1" \
   --public-ip-address "" \
-  --admin-username azureuser \
-  --generate-ssh-keys
+  --location "$LOCATION" \
+  --nsg "${VM1_NAME}-nsg" \
+  --output none
 
-# -------------------------------
-# STEP 2: INSTALL NGINX & BLUE PAGE
-# -------------------------------
-echo "Installing Nginx and blue page..."
-az vm run-command invoke \
-  --resource-group $RESOURCE_GROUP \
-  --name $VM1_NAME \
-  --command-id RunShellScript \
-  --scripts "
-    sudo apt update -y &&
-    sudo apt install nginx -y &&
-    echo '<html><body style=\"background-color:blue;\"><h1>Blue Page</h1></body></html>' | sudo tee /var/www/html/index.html
-    sudo systemctl restart nginx
-  "
+# ------------------ STEP 2: Install NGINX + Blue Page ---------------------
+echo "🌐 Installing NGINX and Blue Page on $VM1_NAME..."
+az vm extension set \
+  --resource-group "$RG" \
+  --vm-name "$VM1_NAME" \
+  --name CustomScript \
+  --publisher Microsoft.Azure.Extensions \
+  --settings '{"commandToExecute":"sudo apt update && sudo apt install -y nginx && echo \"<html><body style='\''background-color:blue;'\''><h1>Blue Page</h1></body></html>\" | sudo tee /var/www/html/index.html && sudo systemctl restart nginx"}' \
+  --output none
 
-# -------------------------------
-# STEP 3: CREATE SNAPSHOT OF VM1
-# -------------------------------
-OS_DISK_ID=$(az vm show --resource-group $RESOURCE_GROUP --name $VM1_NAME --query "storageProfile.osDisk.managedDisk.id" -o tsv)
-SNAPSHOT_NAME="${VM1_NAME}-snap"
+# ------------------ STEP 3: Deallocate + Snapshot ---------------------
+echo "🛑 Deallocating VM before snapshot..."
+az vm deallocate --resource-group "$RG" --name "$VM1_NAME" --output none
 
-echo "Creating snapshot: $SNAPSHOT_NAME ..."
+echo "📦 Getting OS disk name..."
+OSDISK_NAME=$(az vm show --resource-group "$RG" --name "$VM1_NAME" --query "storageProfile.osDisk.name" -o tsv)
+
+echo "📸 Creating snapshot..."
 az snapshot create \
-  --resource-group $RESOURCE_GROUP \
-  --name $SNAPSHOT_NAME \
-  --source $OS_DISK_ID \
-  --location $LOCATION
+  --resource-group "$RG" \
+  --source "$OSDISK_NAME" \
+  --name "$SNAPSHOT_NAME" \
+  --location "$LOCATION" \
+  --output none
 
-# -------------------------------
-# STEP 4: COPY SNAPSHOT TO BLOB
-# -------------------------------
+# ------------------ STEP 4: Upload VHD to Blob ---------------------
+echo "🔗 Generating snapshot SAS URL..."
 SAS_URL=$(az snapshot grant-access \
-  --resource-group $RESOURCE_GROUP \
-  --name $SNAPSHOT_NAME \
+  --resource-group "$RG" \
+  --name "$SNAPSHOT_NAME" \
   --duration-in-seconds 3600 \
-  --query "accessSas" -o tsv)
+  --query accessSas -o tsv)
 
-DEST_BLOB_PATH="${VM1_NAME}/${VM1_NAME}-osdisk.vhd"
-
-echo "Copying snapshot VHD to Blob Storage..."
-az storage blob copy start \
-  --account-name $STORAGE_ACCOUNT \
-  --container-name $CONTAINER \
-  --destination-blob "$DEST_BLOB_PATH" \
+echo "☁️ Starting blob copy to: $CONTAINER/$BLOB_PATH ..."
+COPY_ID=$(az storage blob copy start \
+  --account-name "$STORAGE_ACCOUNT" \
+  --sas-token "$SAS_TOKEN" \
+  --destination-container "$CONTAINER" \
+  --destination-blob "$BLOB_PATH" \
   --source-uri "$SAS_URL" \
-  --sas-token "$SAS_TOKEN"
+  --query "copy.id" -o tsv)
 
-# -------------------------------
-# STEP 5: CREATE VM2 FROM SNAPSHOT
-# -------------------------------
-echo "Creating managed disk from snapshot..."
-DISK2_NAME="${VM2_NAME}-osdisk"
+# Wait for copy to finish
+while true; do
+  STATUS=$(az storage blob show \
+    --account-name "$STORAGE_ACCOUNT" \
+    --sas-token "$SAS_TOKEN" \
+    --container-name "$CONTAINER" \
+    --name "$BLOB_PATH" \
+    --query "properties.copy.status" -o tsv)
+  echo "   ⏳ Copy status: $STATUS"
+  [[ "$STATUS" == "success" ]] && break
+  sleep 10
+done
 
+# ------------------ STEP 5: Create Managed Disk from VHD ---------------------
+BLOB_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/${BLOB_PATH}?${SAS_TOKEN}"
+echo "💽 Creating managed disk from blob..."
 az disk create \
-  --resource-group $RESOURCE_GROUP \
-  --name $DISK2_NAME \
-  --source $SNAPSHOT_NAME \
-  --location $LOCATION
+  --resource-group "$RG" \
+  --name "$DISK_NAME" \
+  --source "$BLOB_URL" \
+  --os-type Linux \
+  --location "$LOCATION" \
+  --output none
 
-echo "Creating VM2: $VM2_NAME ..."
+# ------------------ STEP 6: Create VM2 from Cloned Disk ---------------------
+echo "🖥️ Creating VM2 ($VM2_NAME) from snapshot disk..."
 az vm create \
-  --resource-group $RESOURCE_GROUP \
-  --name $VM2_NAME \
-  --attach-os-disk $DISK2_NAME \
-  --os-type linux \
-  --vnet-name $VNET2 \
-  --subnet $SUBNET2 \
-  --size $SIZE \
+  --resource-group "$RG" \
+  --name "$VM2_NAME" \
+  --attach-os-disk "$DISK_NAME" \
+  --os-type Linux \
+  --size "$VM_SIZE" \
+  --vnet-name "$VNET2" \
+  --subnet "$SUBNET2" \
+  --admin-username "$USERNAME" \
+  --admin-password "$PASSWORD" \
   --public-ip-address "" \
-  --admin-username azureuser \
-  --generate-ssh-keys
+  --location "$LOCATION" \
+  --nsg "${VM2_NAME}-nsg" \
+  --output none
 
-echo "✅ Both VMs created without public IP. VM2 is from snapshot of VM1."
+echo ""
+echo "✅ VMs created successfully with no Public IPs."
+echo "🕸️ Internal access only."
