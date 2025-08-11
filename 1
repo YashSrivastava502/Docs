@@ -1,37 +1,18 @@
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobClient
 
 # Azure Blob Storage details
-connection_string = "YOUR_STORAGE_ACCOUNT_CONNECTION_STRING"
-container_name = "your-container-name"
+account_name = "your_storage_account_name"
+container_name = "your_container_name"
 blob_name = "uploaded-file.txt"  # name in blob
-local_file_path = r"C:\path\to\local\file.txt"  # local file path
+sas_token = "your_sas_token_here"  # without leading '?'
+local_file_path = r"C:\path\to\local\file.txt"
 
-# Create blob service client
-blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-
-# Get container client
-container_client = blob_service_client.get_container_client(container_name)
+# Create blob client using SAS token
+blob_url = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}?{sas_token}"
+blob_client = BlobClient.from_blob_url(blob_url)
 
 # Upload the file
 with open(local_file_path, "rb") as data:
-    container_client.upload_blob(name=blob_name, data=data, overwrite=True)
+    blob_client.upload_blob(data, overwrite=True)
 
 print(f"✅ File '{local_file_path}' uploaded to blob '{blob_name}' in container '{container_name}'.")
-
-
-
-
-az storage blob upload \
-    --account-name <storage_account_name> \
-    --container-name <container_name> \
-    --name <blob_name_in_container> \
-    --file <local_file_path> \
-    --account-key <storage_account_key>
-
-az storage blob upload \
-    --account-name mystorageacct \
-    --container-name mycontainer \
-    --name uploaded-file.txt \
-    --file "C:\path\to\local\file.txt" \
-    --sas-token "?sv=2025-02-01&ss=b&srt=..."
-    
