@@ -2,3 +2,8 @@ Convert-VHD -Path "C:\path\testvm01.vhdx" -DestinationPath "C:\path\testvm01.vhd
 
 Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
 Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Management-PowerShell
+
+
+Invoke-WebRequest `
+  -Uri "https://fpinfbackup.blob.core.windows.net/Test_disk/testvm01.vhdx?<SAS_TOKEN>" `
+  -OutFile "C:\Users\YourUserName\Downloads\testvm01.vhdx"
