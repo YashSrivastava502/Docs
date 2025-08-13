@@ -1,18 +1,1 @@
-from azure.storage.blob import BlobClient
-
-# Azure Blob Storage details
-account_name = "your_storage_account_name"
-container_name = "your_container_name"
-blob_name = "uploaded-file.txt"  # name in blob
-sas_token = "your_sas_token_here"  # without leading '?'
-local_file_path = r"C:\path\to\local\file.txt"
-
-# Create blob client using SAS token
-blob_url = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}?{sas_token}"
-blob_client = BlobClient.from_blob_url(blob_url)
-
-# Upload the file
-with open(local_file_path, "rb") as data:
-    blob_client.upload_blob(data, overwrite=True)
-
-print(f"✅ File '{local_file_path}' uploaded to blob '{blob_name}' in container '{container_name}'.")
+Convert-VHD -Path "C:\path\testvm01.vhdx" -DestinationPath "C:\path\testvm01.vhd" -VHDType Fixed
