@@ -1,1 +1,4 @@
 Convert-VHD -Path "C:\path\testvm01.vhdx" -DestinationPath "C:\path\testvm01.vhd" -VHDType Fixed
+
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Management-PowerShell
