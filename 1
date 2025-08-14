@@ -88,6 +88,91 @@ You should see:
 /dev/sdc1  ext4   20G   ...   /data
 
 
+
+
+
+Gotcha — the issue is that the partition /dev/sdc1 never got created.
+When you ran parted, it didn’t actually create it successfully (your command seemed typed incorrectly).
+
+Let’s fix this step-by-step:
+
+
+---
+
+1️⃣ Open parted interactively
+
+sudo parted /dev/sdc
+
+
+---
+
+2️⃣ Inside parted, run:
+
+mklabel gpt
+mkpart primary ext4 0% 100%
+print
+quit
+
+After print, you should see something like:
+
+Number  Start   End     Size    File system  Name     Flags
+ 1      1049kB  20.0GB  20.0GB               primary
+
+
+---
+
+3️⃣ Verify partition exists
+
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+
+Now you should see:
+
+sdc     20G
+└─sdc1  20G
+
+
+---
+
+4️⃣ Format the new partition
+
+sudo mkfs.ext4 /dev/sdc1
+
+
+---
+
+5️⃣ Create mount point
+
+sudo mkdir -p /data
+
+
+---
+
+6️⃣ Mount it
+
+sudo mount /dev/sdc1 /data
+
+
+---
+
+7️⃣ Make it persist after reboot
+
+Get UUID:
+
+sudo blkid /dev/sdc1
+
+Edit /etc/fstab:
+
+UUID=<your-uuid> /data ext4 defaults 0 2
+
+
+---
+
+If you want, I can also combine all of this into a single one-line non-interactive script so you don’t have to do it step-by-step.
+Do you want me to give you that?
+
+
+
+
 ---
 
 If you want, next we can move your PostgreSQL data directory from /var/lib/postgresql to /data so this disk is used for DB testing.
