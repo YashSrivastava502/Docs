@@ -1,1 +1,97 @@
 lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+
+
+sudo parted /dev/sdc --script mklabel gpt
+sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
+
+
+sudo mkfs.ext4 /dev/sdc1
+
+
+sudo mkdir -p /data
+
+
+Alright — from your lsblk output:
+
+sdc is your new 20 GB disk (currently no partition or filesystem).
+
+sdb is another disk (16 GB, already mounted at /mnt).
+
+sda is your OS disk (30 GB).
+
+
+We’ll now partition, format, and mount sdc to /data.
+
+
+---
+
+1️⃣ Create a partition on /dev/sdc
+
+sudo parted /dev/sdc --script mklabel gpt
+sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
+
+
+---
+
+2️⃣ Format the partition
+
+After partitioning, the new device will be /dev/sdc1:
+
+sudo mkfs.ext4 /dev/sdc1
+
+
+---
+
+3️⃣ Create the /data mount point
+
+sudo mkdir -p /data
+
+
+---
+
+4️⃣ Mount it now
+
+sudo mount /dev/sdc1 /data
+
+
+---
+
+5️⃣ Make it mount automatically after reboot
+
+Get the UUID:
+
+sudo blkid /dev/sdc1
+
+You’ll see something like:
+
+UUID="abcd-1234-xyz" TYPE="ext4"
+
+Edit /etc/fstab:
+
+sudo nano /etc/fstab
+
+Add:
+
+UUID=abcd-1234-xyz   /data   ext4   defaults   0   2
+
+Save and exit.
+
+
+---
+
+6️⃣ Verify
+
+df -hT /data
+
+You should see:
+
+/dev/sdc1  ext4   20G   ...   /data
+
+
+---
+
+If you want, next we can move your PostgreSQL data directory from /var/lib/postgresql to /data so this disk is used for DB testing.
+That way your main OS disk won’t be touched.
+
+Do you want me to set that up for you?
+
