@@ -1,131 +1,39 @@
-lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
-
-
-sudo parted /dev/sdc --script mklabel gpt
-sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
-
-
-sudo mkfs.ext4 /dev/sdc1
-
-
-sudo mkdir -p /data
-
-
-Alright — from your lsblk output:
-
-sdc is your new 20 GB disk (currently no partition or filesystem).
-
-sdb is another disk (16 GB, already mounted at /mnt).
-
-sda is your OS disk (30 GB).
-
-
-We’ll now partition, format, and mount sdc to /data.
+Got it — your parted run failed because you typed mkpart primary ext4 0% 100% while it was still asking for "Yes/No" confirmation.
+Let’s do it cleanly from scratch.
 
 
 ---
 
-1️⃣ Create a partition on /dev/sdc
+Step-by-step to partition, format, and mount /dev/sdc
+
+1️⃣ Check your disk
+
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+
+You should see /dev/sdc with 20G and no partitions.
+
+
+---
+
+2️⃣ Create a new GPT partition table
 
 sudo parted /dev/sdc --script mklabel gpt
+
+
+---
+
+3️⃣ Create a primary partition spanning the whole disk
+
 sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
 
 
 ---
 
-2️⃣ Format the partition
-
-After partitioning, the new device will be /dev/sdc1:
-
-sudo mkfs.ext4 /dev/sdc1
-
-
----
-
-3️⃣ Create the /data mount point
-
-sudo mkdir -p /data
-
-
----
-
-4️⃣ Mount it now
-
-sudo mount /dev/sdc1 /data
-
-
----
-
-5️⃣ Make it mount automatically after reboot
-
-Get the UUID:
-
-sudo blkid /dev/sdc1
-
-You’ll see something like:
-
-UUID="abcd-1234-xyz" TYPE="ext4"
-
-Edit /etc/fstab:
-
-sudo nano /etc/fstab
-
-Add:
-
-UUID=abcd-1234-xyz   /data   ext4   defaults   0   2
-
-Save and exit.
-
-
----
-
-6️⃣ Verify
-
-df -hT /data
-
-You should see:
-
-/dev/sdc1  ext4   20G   ...   /data
-
-
-
-
-
-Gotcha — the issue is that the partition /dev/sdc1 never got created.
-When you ran parted, it didn’t actually create it successfully (your command seemed typed incorrectly).
-
-Let’s fix this step-by-step:
-
-
----
-
-1️⃣ Open parted interactively
-
-sudo parted /dev/sdc
-
-
----
-
-2️⃣ Inside parted, run:
-
-mklabel gpt
-mkpart primary ext4 0% 100%
-print
-quit
-
-After print, you should see something like:
-
-Number  Start   End     Size    File system  Name     Flags
- 1      1049kB  20.0GB  20.0GB               primary
-
-
----
-
-3️⃣ Verify partition exists
+4️⃣ Verify the partition
 
 lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
 
-Now you should see:
+You should now see:
 
 sdc     20G
 └─sdc1  20G
@@ -133,50 +41,57 @@ sdc     20G
 
 ---
 
-4️⃣ Format the new partition
+5️⃣ Format the partition as ext4
 
 sudo mkfs.ext4 /dev/sdc1
 
 
 ---
 
-5️⃣ Create mount point
+6️⃣ Create a mount point
 
 sudo mkdir -p /data
 
 
 ---
 
-6️⃣ Mount it
+7️⃣ Mount it
 
 sudo mount /dev/sdc1 /data
 
 
 ---
 
-7️⃣ Make it persist after reboot
+8️⃣ Verify
 
-Get UUID:
+df -hT /data
+
+Expected:
+
+/dev/sdc1  ext4   20G   ...   /data
+
+
+---
+
+9️⃣ Make it permanent after reboot Get the UUID:
 
 sudo blkid /dev/sdc1
 
 Edit /etc/fstab:
 
-UUID=<your-uuid> /data ext4 defaults 0 2
+sudo nano /etc/fstab
+
+Add this line:
+
+UUID=<your-uuid-here>   /data   ext4   defaults   0   2
+
+Save and exit (CTRL+O, ENTER, CTRL+X).
 
 
 ---
 
-If you want, I can also combine all of this into a single one-line non-interactive script so you don’t have to do it step-by-step.
-Do you want me to give you that?
+If you want, I can now give you PostgreSQL steps to move the data directory to /data so your DB actually uses this new disk for testing.
+That way, nothing touches the OS disk.
 
-
-
-
----
-
-If you want, next we can move your PostgreSQL data directory from /var/lib/postgresql to /data so this disk is used for DB testing.
-That way your main OS disk won’t be touched.
-
-Do you want me to set that up for you?
+Do you want me to give you that next?
 
