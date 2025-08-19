@@ -1,97 +1,84 @@
-Got it — your parted run failed because you typed mkpart primary ext4 0% 100% while it was still asking for "Yes/No" confirmation.
-Let’s do it cleanly from scratch.
+Perfect 👍 since this is a fresh VM and the 400 GB disk is new (no data yet), we can directly partition, format, and mount it at /var/lib/clickhouse.
+
+Here’s your clean setup:
 
 
 ---
 
-Step-by-step to partition, format, and mount /dev/sdc
+🔹 Mount 400 GB Disk for ClickHouse
 
-1️⃣ Check your disk
+1️⃣ Find the new disk
 
 lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
 
-You should see /dev/sdc with 20G and no partitions.
+Look for the ~400 GB disk (e.g. /dev/sdc).
+Assume it’s /dev/sdc in this example.
 
 
 ---
 
-2️⃣ Create a new GPT partition table
+2️⃣ Partition the disk
 
 sudo parted /dev/sdc --script mklabel gpt
-
-
----
-
-3️⃣ Create a primary partition spanning the whole disk
-
 sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
 
 
 ---
 
-4️⃣ Verify the partition
-
-lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
-
-You should now see:
-
-sdc     20G
-└─sdc1  20G
-
-
----
-
-5️⃣ Format the partition as ext4
+3️⃣ Format the partition
 
 sudo mkfs.ext4 /dev/sdc1
 
 
 ---
 
-6️⃣ Create a mount point
+4️⃣ Create the ClickHouse data directory
 
-sudo mkdir -p /data
-
-
----
-
-7️⃣ Mount it
-
-sudo mount /dev/sdc1 /data
+sudo mkdir -p /var/lib/clickhouse
 
 
 ---
 
-8️⃣ Verify
+5️⃣ Mount the new disk
 
-df -hT /data
-
-Expected:
-
-/dev/sdc1  ext4   20G   ...   /data
+sudo mount /dev/sdc1 /var/lib/clickhouse
 
 
 ---
 
-9️⃣ Make it permanent after reboot Get the UUID:
+6️⃣ Persist after reboot
+
+Get UUID:
 
 sudo blkid /dev/sdc1
+
+Output example:
+
+/dev/sdc1: UUID="abcd-1234-efgh-5678" TYPE="ext4"
 
 Edit /etc/fstab:
 
 sudo nano /etc/fstab
 
-Add this line:
+Add:
 
-UUID=<your-uuid-here>   /data   ext4   defaults   0   2
-
-Save and exit (CTRL+O, ENTER, CTRL+X).
+UUID=abcd-1234-efgh-5678   /var/lib/clickhouse   ext4   defaults   0   2
 
 
 ---
 
-If you want, I can now give you PostgreSQL steps to move the data directory to /data so your DB actually uses this new disk for testing.
-That way, nothing touches the OS disk.
+7️⃣ Verify
 
-Do you want me to give you that next?
+df -hT /var/lib/clickhouse
+
+Should show something like:
+
+/dev/sdc1   ext4   393G   24M   373G   1%   /var/lib/clickhouse
+
+
+---
+
+✅ Done — your 400 GB external disk is now mounted at /var/lib/clickhouse and will persist after reboots.
+
+Do you want me to also prepare a one-shot script you can just run to do all this automatically?
 
