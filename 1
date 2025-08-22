@@ -1,84 +1,47 @@
-Perfect 👍 since this is a fresh VM and the 400 GB disk is new (no data yet), we can directly partition, format, and mount it at /var/lib/clickhouse.
+import pdfplumber
 
-Here’s your clean setup:
-
-
----
-
-🔹 Mount 400 GB Disk for ClickHouse
-
-1️⃣ Find the new disk
-
-lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
-
-Look for the ~400 GB disk (e.g. /dev/sdc).
-Assume it’s /dev/sdc in this example.
-
-
----
-
-2️⃣ Partition the disk
-
-sudo parted /dev/sdc --script mklabel gpt
-sudo parted /dev/sdc --script mkpart primary ext4 0% 100%
-
-
----
-
-3️⃣ Format the partition
-
-sudo mkfs.ext4 /dev/sdc1
+def extract_serials(pdf_path):
+    """
+    Extract all serial numbers from the 'Serial #' column in a PDF contract.
+    """
+    serials = set()
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                # Find the header row
+                headers = [h.strip().lower() if h else "" for h in table[0]]
+                if "serial #" in headers:
+                    serial_idx = headers.index("serial #")
+                    # Extract serials from each row
+                    for row in table[1:]:
+                        if row and len(row) > serial_idx:
+                            serial = row[serial_idx]
+                            if serial and serial.strip():
+                                serials.add(serial.strip())
+    return serials
 
 
----
+# File paths
+pdf_2023 = "HPE Synergy PO 2023-10-02-001.pdf"
+pdf_2024 = "HPE Synergy PO_2024-10-11-001.pdf"
 
-4️⃣ Create the ClickHouse data directory
+# Extract serials
+serials_2023 = extract_serials(pdf_2023)
+serials_2024 = extract_serials(pdf_2024)
 
-sudo mkdir -p /var/lib/clickhouse
+# Compare
+missing_in_2023 = serials_2024 - serials_2023
+present_in_both = serials_2024 & serials_2023
 
+# Output results
+print(f"Total serials in 2024 contract: {len(serials_2024)}")
+print(f"Total serials in 2023 contract: {len(serials_2023)}\n")
 
----
+print("✅ Present in both contracts:")
+for s in sorted(present_in_both):
+    print(s)
 
-5️⃣ Mount the new disk
-
-sudo mount /dev/sdc1 /var/lib/clickhouse
-
-
----
-
-6️⃣ Persist after reboot
-
-Get UUID:
-
-sudo blkid /dev/sdc1
-
-Output example:
-
-/dev/sdc1: UUID="abcd-1234-efgh-5678" TYPE="ext4"
-
-Edit /etc/fstab:
-
-sudo nano /etc/fstab
-
-Add:
-
-UUID=abcd-1234-efgh-5678   /var/lib/clickhouse   ext4   defaults   0   2
-
-
----
-
-7️⃣ Verify
-
-df -hT /var/lib/clickhouse
-
-Should show something like:
-
-/dev/sdc1   ext4   393G   24M   373G   1%   /var/lib/clickhouse
-
-
----
-
-✅ Done — your 400 GB external disk is now mounted at /var/lib/clickhouse and will persist after reboots.
-
-Do you want me to also prepare a one-shot script you can just run to do all this automatically?
-
+print("\n❌ Missing in 2023 but present in 2024:")
+for s in sorted(missing_in_2023):
+    print(s)
