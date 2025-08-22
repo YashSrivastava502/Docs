@@ -1,48 +1,203 @@
-import pdfplumber
+# filename: compare_serials.py
+# Usage: python compare_serials.py
 
-def extract_serials(pdf_path):
+import pdfplumber, re, os
+from collections import defaultdict
+
+# ---- tweakables -------------------------------------------------------------
+PDF_2023 = "HPE Synergy PO 2023-10-02-001.pdf"
+PDF_2024 = "HPE Synergy PO_2024-10-11-001.pdf"
+OUTPUT_TXT = "serial_comparison.txt"
+
+# HPE serials seen are typically 10 chars, uppercase+digits (no hyphen/underscore).
+# Allow 9–12 to be safe, require at least one letter to avoid pure numbers.
+SERIAL_RE = re.compile(r"\b(?=[A-Z0-9]{9,12}\b)(?=.*[A-Z])[A-Z0-9]{9,12}\b")
+
+# Set to True to try OCR if both methods return 0 (requires tesseract installed)
+DO_OCR_FALLBACK = False
+# ----------------------------------------------------------------------------
+
+
+def _group_by_line(words, y_tol=3.0):
+    """Group words into lines using their vertical position."""
+    lines = defaultdict(list)
+    for w in words:
+        y = round((w["top"] + w["bottom"]) / 2.0, 1)
+        key = round(y / y_tol) * y_tol
+        lines[key].append(w)
+    # sort each line by x
+    for k in list(lines.keys()):
+        lines[k] = sorted(lines[k], key=lambda w: w["x0"])
+    return dict(sorted(lines.items(), key=lambda kv: kv[0]))
+
+
+def _find_serial_column_band(page):
+    """
+    Find the x-band [x_left, x_right] of the 'Serial #' column by locating the header row.
+    Returns (x_left, x_right, header_bottom) or (None, None, None) if not found.
+    """
+    words = page.extract_words(use_text_flow=True, extra_attrs=["x0","x1","top","bottom"])
+    lines = _group_by_line(words)
+
+    for _, line_words in lines.items():
+        texts = [w["text"].strip() for w in line_words]
+        texts_lower = [t.lower() for t in texts]
+        # try to find 'serial' token on this header line
+        cand_idx = None
+        for i, t in enumerate(texts_lower):
+            if t == "serial" or t == "serial#":
+                cand_idx = i
+                break
+            # handle "serial #" split into two tokens
+            if t == "serial" and i + 1 < len(texts_lower) and texts_lower[i+1] in {"#", "no.", "no"}:
+                cand_idx = i
+                break
+            # sometimes header is 'serial #' as one token with space (rare)
+            if "serial" in t and "#" in t:
+                cand_idx = i
+                break
+
+        if cand_idx is None:
+            continue
+
+        # Compute x-center of header tokens
+        centers = [ (w["x0"] + w["x1"]) / 2.0 for w in line_words ]
+        serial_center = centers[cand_idx]
+        serial_w = max(8.0, line_words[cand_idx]["x1"] - line_words[cand_idx]["x0"])
+
+        # neighbors: use immediate prev/next header tokens to bound
+        left_center = centers[cand_idx - 1] if cand_idx - 1 >= 0 else serial_center - serial_w*1.5
+        right_center = centers[cand_idx + 1] if cand_idx + 1 < len(centers) else serial_center + serial_w*1.5
+
+        # band is midpoint between centers
+        x_left = (left_center + serial_center) / 2.0
+        x_right = (serial_center + right_center) / 2.0
+        # widen slightly
+        pad = max(4.0, (x_right - x_left) * 0.08)
+        x_left -= pad
+        x_right += pad
+
+        header_bottom = max(w["bottom"] for w in line_words)
+        return x_left, x_right, header_bottom
+
+    return None, None, None
+
+
+def extract_serials_column_aware(pdf_path):
+    """Coordinate-based extraction limited to the 'Serial #' column band."""
     serials = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table:
-                    continue
-                headers = [h.strip().lower() if h else "" for h in table[0]]
-                if "serial #" in headers:
-                    serial_idx = headers.index("serial #")
-                    for row in table[1:]:
-                        if row and len(row) > serial_idx:
-                            serial = row[serial_idx]
-                            if serial and serial.strip():
-                                serials.add(serial.strip())
+            x_left, x_right, header_bottom = _find_serial_column_band(page)
+            if x_left is None:
+                continue
+
+            words = page.extract_words(use_text_flow=True, extra_attrs=["x0","x1","top","bottom"])
+            col_words = []
+            for w in words:
+                # below header, and inside x band
+                if w["top"] > header_bottom + 1.0:
+                    cx = (w["x0"] + w["x1"]) / 2.0
+                    if x_left <= cx <= x_right:
+                        col_words.append(w)
+
+            # group by line and capture tokens in that band
+            lines = _group_by_line(col_words)
+            for _, line_words in lines.items():
+                text_line = " ".join([w["text"].strip() for w in line_words if w["text"].strip()])
+                # normalize and extract serial candidates
+                candidates = SERIAL_RE.findall(text_line.upper())
+                for c in candidates:
+                    # filter out obvious non-serials (safety: exclude hyphens/underscores)
+                    if "-" in c or "_" in c:
+                        continue
+                    serials.add(c)
+
     return serials
 
 
-# File paths
-pdf_2023 = "HPE Synergy PO 2023-10-02-001.pdf"
-pdf_2024 = "HPE Synergy PO_2024-10-11-001.pdf"
-output_file = "serial_comparison.txt"
+def extract_serials_text_fallback(pdf_path):
+    """Text-only fallback: scan lines that contain 'Serial' and grab token after label."""
+    serials = set()
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            for raw_line in txt.splitlines():
+                line = raw_line.strip()
+                if not line or "serial" not in line.lower():
+                    continue
+                # common patterns like: Serial # CNX3710811, Serial#: MXL2491J72
+                m = re.search(r"serial\s*#?\s*[:\-]?\s*([A-Za-z0-9]{9,12})\b", line, flags=re.IGNORECASE)
+                if m:
+                    cand = m.group(1).upper()
+                    if SERIAL_RE.fullmatch(cand):
+                        serials.add(cand)
+                else:
+                    # As a last resort, pick strongest-looking token on the line
+                    for tok in re.findall(r"[A-Za-z0-9]{9,12}", line):
+                        tok = tok.upper()
+                        if SERIAL_RE.fullmatch(tok):
+                            serials.add(tok)
+    return serials
 
-# Extract serials
-serials_2023 = extract_serials(pdf_2023)
-serials_2024 = extract_serials(pdf_2024)
 
-# Compare
-missing_in_2023 = serials_2024 - serials_2023
-present_in_both = serials_2024 & serials_2023
+def extract_serials(pdf_path):
+    """Hybrid approach: column-aware first, then text fallback, then optional OCR."""
+    s = extract_serials_column_aware(pdf_path)
+    if not s:
+        s = extract_serials_text_fallback(pdf_path)
 
-# Write to text file
-with open(output_file, "w") as f:
-    f.write(f"Total serials in 2024 contract: {len(serials_2024)}\n")
-    f.write(f"Total serials in 2023 contract: {len(serials_2023)}\n\n")
+    if not s and DO_OCR_FALLBACK:
+        try:
+            from pdf2image import convert_from_path
+            import pytesseract
+            pages = convert_from_path(pdf_path, dpi=300)
+            for img in pages:
+                txt = pytesseract.image_to_string(img) or ""
+                for tok in re.findall(r"[A-Za-z0-9]{9,12}", txt):
+                    tok = tok.upper()
+                    if SERIAL_RE.fullmatch(tok):
+                        s.add(tok)
+        except Exception as e:
+            print(f"[WARN] OCR fallback failed/not available: {e}")
 
-    f.write("✅ Present in both contracts:\n")
-    for s in sorted(present_in_both):
-        f.write(s + "\n")
+    return s
 
-    f.write("\n❌ Missing in 2023 but present in 2024:\n")
-    for s in sorted(missing_in_2023):
-        f.write(s + "\n")
 
-print(f"✅ Comparison complete. Results saved to {output_file}")
+def write_output(file_path, serials_2023, serials_2024):
+    missing_in_2023 = serials_2024 - serials_2023
+    present_in_both = serials_2024 & serials_2023
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(f"Total serials in 2024 contract: {len(serials_2024)}\n")
+        f.write(f"Total serials in 2023 contract: {len(serials_2023)}\n\n")
+
+        f.write("✅ Present in both contracts:\n")
+        for s in sorted(present_in_both):
+            f.write(s + "\n")
+
+        f.write("\n❌ Missing in 2023 but present in 2024:\n")
+        for s in sorted(missing_in_2023):
+            f.write(s + "\n")
+
+    # Optional: also dump raw lists for quick auditing
+    with open("all_serials_2023.txt", "w", encoding="utf-8") as f:
+        for s in sorted(serials_2023):
+            f.write(s + "\n")
+    with open("all_serials_2024.txt", "w", encoding="utf-8") as f:
+        for s in sorted(serials_2024):
+            f.write(s + "\n")
+
+
+def main():
+    s23 = extract_serials(PDF_2023)
+    s24 = extract_serials(PDF_2024)
+
+    print(f"[INFO] Found {len(s24)} serials in 2024 and {len(s23)} in 2023")
+    write_output(OUTPUT_TXT, s23, s24)
+    print(f"[OK] Results written to {OUTPUT_TXT}")
+    if len(s24) == 0:
+        print("[HINT] 2024 count is 0. If your PDF is a scan, set DO_OCR_FALLBACK=True at top.")
+
+if __name__ == "__main__":
+    main()
