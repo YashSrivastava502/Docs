@@ -1,33 +1,40 @@
 import pdfplumber
-import csv
+import openpyxl
 import os
 
-def pdf_to_csv(pdf_path, csv_path):
-    with pdfplumber.open(pdf_path) as pdf, open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+def pdf_to_excel(pdf_path, excel_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "PDF_Data"
 
+    row_num = 1
+
+    with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            # Try to extract tables
+            # Extract tables first
             tables = page.extract_tables()
             if tables:
                 for table in tables:
                     for row in table:
-                        writer.writerow([cell if cell else "" for cell in row])
+                        ws.append([cell if cell else "" for cell in row])
+                        row_num += 1
             else:
-                # If no table, extract plain text
+                # If no tables, extract plain text
                 text = page.extract_text()
                 if text:
                     for line in text.split("\n"):
-                        writer.writerow([line])
+                        ws.append([line])
+                        row_num += 1
 
-    print(f"✅ Converted '{pdf_path}' to '{csv_path}'")
+    wb.save(excel_path)
+    print(f"✅ Converted '{pdf_path}' → '{excel_path}'")
 
 
 if __name__ == "__main__":
-    pdf_file = "input.pdf"   # <-- yaha apna PDF file ka path do
-    csv_file = "output.csv"  # <-- yaha output CSV ka naam set karo
+    pdf_file = "input.pdf"      # <-- yaha apna PDF file ka path do
+    excel_file = "output.xlsx"  # <-- yaha output Excel file ka naam set karo
 
     if os.path.exists(pdf_file):
-        pdf_to_csv(pdf_file, csv_file)
+        pdf_to_excel(pdf_file, excel_file)
     else:
         print("❌ PDF file not found!")
