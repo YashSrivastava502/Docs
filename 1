@@ -1,19 +1,33 @@
-import camelot
+import pdfplumber
+import csv
+import os
 
-pdf_file = "HPE Synergy PO_2024-10-11-001.pdf"
-output_csv = "HPE_2024.csv"
+def pdf_to_csv(pdf_path, csv_path):
+    with pdfplumber.open(pdf_path) as pdf, open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
 
-# extract tables
-tables = camelot.read_pdf(pdf_file, pages="all", strip_text="\n")
+        for page_num, page in enumerate(pdf.pages, start=1):
+            # Try to extract tables
+            tables = page.extract_tables()
+            if tables:
+                for table in tables:
+                    for row in table:
+                        writer.writerow([cell if cell else "" for cell in row])
+            else:
+                # If no table, extract plain text
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        writer.writerow([line])
 
-# agar multiple tables detect huye toh unko jod lo
-combined = None
-for t in tables:
-    df = t.df
-    if combined is None:
-        combined = df
+    print(f"✅ Converted '{pdf_path}' to '{csv_path}'")
+
+
+if __name__ == "__main__":
+    pdf_file = "input.pdf"   # <-- yaha apna PDF file ka path do
+    csv_file = "output.csv"  # <-- yaha output CSV ka naam set karo
+
+    if os.path.exists(pdf_file):
+        pdf_to_csv(pdf_file, csv_file)
     else:
-        combined = combined.append(df, ignore_index=True)
-
-combined.to_csv(output_csv, index=False)
-print(f"✅ Saved CSV: {output_csv}")
+        print("❌ PDF file not found!")
