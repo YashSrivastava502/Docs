@@ -1,5 +1,3 @@
-pip install camelot-py[cv] pandas
-
 import pandas as pd
 
 csv_2023 = "HPE_2023.csv"
@@ -18,4 +16,16 @@ serials_2024 = set(df24["serial #"].dropna().astype(str).str.strip())
 missing_in_2023 = serials_2024 - serials_2023
 present_in_both = serials_2024 & serials_2023
 
-with open("serial_comparison.txt", "w
+with open("serial_comparison.txt", "w") as f:
+    f.write(f"Total serials in 2024: {len(serials_2024)}\n")
+    f.write(f"Total serials in 2023: {len(serials_2023)}\n\n")
+
+    f.write("✅ Present in both:\n")
+    for s in sorted(present_in_both):
+        f.write(s + "\n")
+
+    f.write("\n❌ Missing in 2023 but present in 2024:\n")
+    for s in sorted(missing_in_2023):
+        f.write(s + "\n")
+
+print("✅ Comparison done → serial_comparison.txt")
