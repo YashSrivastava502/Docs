@@ -1,19 +1,16 @@
 import pdfplumber
 
 def extract_serials(pdf_path):
-    """
-    Extract all serial numbers from the 'Serial #' column in a PDF contract.
-    """
     serials = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                # Find the header row
+                if not table:
+                    continue
                 headers = [h.strip().lower() if h else "" for h in table[0]]
                 if "serial #" in headers:
                     serial_idx = headers.index("serial #")
-                    # Extract serials from each row
                     for row in table[1:]:
                         if row and len(row) > serial_idx:
                             serial = row[serial_idx]
@@ -25,6 +22,7 @@ def extract_serials(pdf_path):
 # File paths
 pdf_2023 = "HPE Synergy PO 2023-10-02-001.pdf"
 pdf_2024 = "HPE Synergy PO_2024-10-11-001.pdf"
+output_file = "serial_comparison.txt"
 
 # Extract serials
 serials_2023 = extract_serials(pdf_2023)
@@ -34,14 +32,17 @@ serials_2024 = extract_serials(pdf_2024)
 missing_in_2023 = serials_2024 - serials_2023
 present_in_both = serials_2024 & serials_2023
 
-# Output results
-print(f"Total serials in 2024 contract: {len(serials_2024)}")
-print(f"Total serials in 2023 contract: {len(serials_2023)}\n")
+# Write to text file
+with open(output_file, "w") as f:
+    f.write(f"Total serials in 2024 contract: {len(serials_2024)}\n")
+    f.write(f"Total serials in 2023 contract: {len(serials_2023)}\n\n")
 
-print("✅ Present in both contracts:")
-for s in sorted(present_in_both):
-    print(s)
+    f.write("✅ Present in both contracts:\n")
+    for s in sorted(present_in_both):
+        f.write(s + "\n")
 
-print("\n❌ Missing in 2023 but present in 2024:")
-for s in sorted(missing_in_2023):
-    print(s)
+    f.write("\n❌ Missing in 2023 but present in 2024:\n")
+    for s in sorted(missing_in_2023):
+        f.write(s + "\n")
+
+print(f"✅ Comparison complete. Results saved to {output_file}")
