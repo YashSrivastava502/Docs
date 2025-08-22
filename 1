@@ -1,40 +1,29 @@
 import pdfplumber
 import openpyxl
-import os
 
 def pdf_to_excel(pdf_path, excel_path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "PDF_Data"
 
-    row_num = 1
-
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            # Extract tables first
             tables = page.extract_tables()
             if tables:
                 for table in tables:
                     for row in table:
-                        ws.append([cell if cell else "" for cell in row])
-                        row_num += 1
+                        # Force UTF-8 clean string conversion
+                        clean_row = [str(cell).encode("utf-8", "ignore").decode("utf-8") if cell else "" for cell in row]
+                        ws.append(clean_row)
             else:
-                # If no tables, extract plain text
                 text = page.extract_text()
                 if text:
                     for line in text.split("\n"):
-                        ws.append([line])
-                        row_num += 1
+                        clean_line = line.encode("utf-8", "ignore").decode("utf-8")
+                        ws.append([clean_line])
 
     wb.save(excel_path)
-    print(f"✅ Converted '{pdf_path}' → '{excel_path}'")
+    print(f"✅ '{pdf_path}' → '{excel_path}' conversion complete.")
 
-
-if __name__ == "__main__":
-    pdf_file = "input.pdf"      # <-- yaha apna PDF file ka path do
-    excel_file = "output.xlsx"  # <-- yaha output Excel file ka naam set karo
-
-    if os.path.exists(pdf_file):
-        pdf_to_excel(pdf_file, excel_file)
-    else:
-        print("❌ PDF file not found!")
+# Example
+pdf_to_excel("input.pdf", "output.xlsx")
