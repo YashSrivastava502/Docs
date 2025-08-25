@@ -1,18 +1,23 @@
-from pyad import adgroup, aduser
+import subprocess
 
-# Load AD group
-group = adgroup.ADGroup.from_cn("ParadisoLMS_SSO")
+ps_script = r'''
+$groupMembers = (Get-ADGroup "ParadisoLMS_SSO" -Properties Members).Members
+$emails = @()
+foreach ($memberDN in $groupMembers) {
+    $user = Get-ADUser -Identity $memberDN -Properties mail
+    if ($user.mail) {
+        $emails += $user.mail
+    }
+}
+$emails
+'''
 
-email_list = []
+result = subprocess.run(
+    ["powershell", "-Command", ps_script],
+    capture_output=True, text=True
+)
 
-# Iterate through group members
-for member in group.get_members():
-    if isinstance(member, aduser.ADUser):  # ensure it's a user, not a nested group
-        email = member.get_attribute("mail")
-        if email:
-            email_list.append(email[0])  # email attribute is a list
-
-# Print emails
+emails = result.stdout.strip().splitlines()
 print("Emails in ParadisoLMS_SSO:")
-for mail in email_list:
+for mail in emails:
     print(mail)
