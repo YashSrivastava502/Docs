@@ -1,29 +1,18 @@
-import pdfplumber
-import openpyxl
+from pyad import adgroup, aduser
 
-def pdf_to_excel(pdf_path, excel_path):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "PDF_Data"
+# Load AD group
+group = adgroup.ADGroup.from_cn("ParadisoLMS_SSO")
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            tables = page.extract_tables()
-            if tables:
-                for table in tables:
-                    for row in table:
-                        # Force UTF-8 clean string conversion
-                        clean_row = [str(cell).encode("utf-8", "ignore").decode("utf-8") if cell else "" for cell in row]
-                        ws.append(clean_row)
-            else:
-                text = page.extract_text()
-                if text:
-                    for line in text.split("\n"):
-                        clean_line = line.encode("utf-8", "ignore").decode("utf-8")
-                        ws.append([clean_line])
+email_list = []
 
-    wb.save(excel_path)
-    print(f"✅ '{pdf_path}' → '{excel_path}' conversion complete.")
+# Iterate through group members
+for member in group.get_members():
+    if isinstance(member, aduser.ADUser):  # ensure it's a user, not a nested group
+        email = member.get_attribute("mail")
+        if email:
+            email_list.append(email[0])  # email attribute is a list
 
-# Example
-pdf_to_excel("input.pdf", "output.xlsx")
+# Print emails
+print("Emails in ParadisoLMS_SSO:")
+for mail in email_list:
+    print(mail)
