@@ -1,90 +1,36 @@
-East US (US East), 1-month (~730 hrs) price check for each Azure item. Where you didn’t specify a tier/sku, I’ve noted assumptions and ranges.
-
-1. Internal Load Balancer – Basic (ILB Basic)
+Here’s the pricing for Azure Standard Load Balancer (relevant after the Basic SKU sunset on September 30, 2025) in East US:
 
 
+---
 
-~$0/month (Basic Load Balancer is free). Note: Basic LB is retiring Sept 30, 2025; plan to move to Standard. 
+Standard Load Balancer Pricing (East US)
 
-
-2. FortiGate Firewall (4 vCPU, 2 NICs)
-
-
-
-BYOL: $0/hr Azure software fee (you supply the Fortinet license). You’ll still pay for the VM compute, disks, IPs, bandwidth. 
-
-PAYG (Marketplace): $1.02/hr software fee ⇒ ~$744.60/month for the software + Azure VM compute, disks, IPs, bandwidth. (Price shown for the 4 vCPU PAYG plan.) 
+First 5 rules: $0.025 per hour → roughly $18.25/month (assuming ~730 hours)
 
 
-3. Azure Compute Gallery (formerly Shared Image Gallery)
+Additional rules: Typically $0.01 per rule per hour, which means $7.30 per rule per month
 
 
+Data processed: Charged at $0.005 per GB
 
-Gallery service itself: $0. You pay for underlying storage (managed images/snapshots), replication, and egress only. 
-
-
-4. Blob Storage – 1.5 TB
-
-
-
-Pricing depends on access tier and redundancy. As a ballpark for LRS in East US:
-
-Hot tier: $28–$31/month** for 1.5 TB (excludes transactions/egress). 
-
-Cool tier: $15–$16/month** (plus higher read/early-deletion fees). 
-
-(Exact $/GB varies by region and redundancy; use the official calculator for a precise quote.) 
-
-
-
-5. Azure Site Recovery (ASR) – 12 protected VMs
-
-
-
-$25 per protected instance / month (after the first 31 days of replication for that VM).
-
-Estimate: 12 × $25 = $300/month for protection fees. Storage/IO/egress for replication is extra. 
-
-
-
-6. 100 Public IP addresses (Standard, static IPv4)
-
-
-
-~$0.005 per IP per hour ⇒ ~$3.65 per IP per month ⇒ ~$365/month for 100 IPs. (Standard SKU recommended; Basic pricing differs.) 
-
-
-7. 3 Virtual Networks (VNets)
-
-
-
-$0 for the VNet resources themselves. You may incur charges for peering, gateways, private endpoints, data processing/egress if used. 
-
-
-8. Azure Front Door (global L7 load balancer)
-
-
-
-Base fee per profile (billed hourly):
-
-Standard: $35/month
-
-Premium: $330/month
-
-
-Plus usage: egress from edge to clients, requests (per 10k), and (in some cases) edge→origin egress. Data from Azure origin to Front Door Standard/Premium is free. 
 
 
 
 ---
 
-Quick notes & assumptions
+Example Scenarios
 
-Month assumed as 730 hours.
+Scenario	Est. Monthly Cost
 
-Region-specific prices may vary slightly by currency/program; for an exact quote against your subscription, plug these into the Azure Pricing Calculator and select East US. 
+Minimal config (≤5 rules, minimal data)	~$18.25 (base rules) + data charges
+Add one extra rule	~$18.25 + $7.30 = ~$25.55
+Heavy data throughput (e.g. 10 GB processed)	~$18.25 + (10 GB × $0.005) = ~$18.30
 
 
-If you want, tell me your intended Blob tier (Hot/Cool/Archive) + redundancy (LRS/ZRS/GRS) and Front Door tier + rough traffic and I’ll compute a tighter estimate with line items.
+So, if you're only using up to 5 rules, expect around $18/month base. Each additional rule adds about $7/month, plus data processing at $0.005/GB.
 
+
+---
+
+If you'd like, I can update your cost report with these precise figures or build out other scenarios you're considering. Just let me know!
 
