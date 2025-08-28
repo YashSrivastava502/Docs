@@ -1,59 +1,68 @@
-Here’s the cost estimate for 5 VMs, each with 4 vCPU, 16 GB RAM, and an external 100 GB disk (assuming Premium SSD) in East US, Ubuntu Linux (PAYG):
+Nice — here’s a clear, actionable cost estimate for 5 × Windows Server 2022 VMs (East US, Pay-As-You-Go) with 4 vCPU / 16 GB RAM each and an external 100 GB managed disk per VM.
 
 
 ---
 
-Cost Breakdown
+Summary (monthly, East US, PAYG, ~730 hours/month)
 
-1. VM Compute – 4 vCPU, 16 GB RAM
+Assumptions
 
-The closest matching SKU (D4as v5 or D4s v5) costs approximately $0.171–$0.192 per hour, which translates to:
+VM size used: closest matching SKU D4as v5 / D4s v3 (4 vCPU, 16 GB RAM).
 
-Hourly: ~$0.171–0.192
+Windows Server license is included in the VM price (License-included VM). 
 
-Monthly (~730 hours): $124.8 to $140.2
-— e.g., D4as v5: $141.62/month 
+Disk: Premium SSD managed disk pricing used at ~$0.12/GB-month (Premium SSD v2 typical rate). 
 
-
-2. Premium SSD (100 GB)
-
-Premium SSD disk pricing (P10/P20) generally ranges between:
-
-$0.12–$0.15 per GB per month → Estimated: $12–$15 per 100 GB
-From pricing data (e.g., P30 1 TB at ~$122.88/month) 
-Or derive as ~$0.143/GB using interpolation (512 GB disk at $73.22/month) 
+Month = 730 hours.
 
 
+Per VM estimate
 
----
+VM (Windows, D4as v5 / D4s v3): ~$259.88 / month (license-included). 
 
-Summary Cost Table (Per VM and for 5 VMs)
-
-Item	Per VM Monthly Cost	5 VMs Total Cost
-
-VM Compute	$125 – $142	$625 – $710
-Premium SSD (100 GB)	$12 – $15	$60 – $75
-Estimated Total	$137 – $157	$685 – $785
+Managed Disk (100 GB Premium SSD): 100 × $0.12 = $12.00 / month. 
 
 
-Total Estimate for 5 VMs: between $685 and $785 per month
+Total per VM: $259.88 + $12.00 = $271.88 / month
+
+Total for 5 VMs:
+5 × $271.88 = $1,359.40 / month
 
 
 ---
 
-Notes & Clarifications
+Detailed table
 
-VM cost range reflects pricing variability between $0.171/hr (74.4$/mo) and $0.192/hr (140$/mo); we used the more recent D4as v5 price (~141$/mo) .
+Item	Qty	Unit price (USD / month)	Subtotal (USD / month)
 
-The disk cost is estimated using interpolation or typical Premium SSD tiers; actual pricing depends on specific SKU and region.
+Windows VM (D4as v5 / D4s v3)	5	$259.88	$1,299.40
+Premium SSD managed disk (100 GB)	5	$12.00	$60.00
+Grand Total	—	—	$1,359.40
 
-Does not include: bandwidth, snapshots, OS license, or managed backups.
 
-You can potentially reduce costs with Reserved Instance or Spot pricing.
-
+Key citations / sources: Azure Windows VM pricing and SKU references; managed disk pricing; Windows license included in VM price. 
 
 
 ---
 
-Let me know if you’d like this formatted as a CSV/Excel report, or if you'd like breakdowns based on different disk types or savings plan scenarios!
+CSV (copy-paste to save as windows_vm_5_report.csv)
+
+Item,Qty,Unit Price (USD/month),Subtotal (USD/month)
+Windows VM (D4as v5 / D4s v3),5,259.88,1299.40
+Premium SSD managed disk (100 GB),5,12.00,60.00
+Grand Total,,,$1359.40
+
+
+---
+
+Notes & Options
+
+If you prefer a cheaper disk (Standard SSD or HDD) the disk cost drops (example: Standard SSD ~ $0.05–0.06/GB → 100 GB ≈ $5–6).
+
+If you plan to run these long-term, Reserved Instances or Savings Plans (1-yr / 3-yr) can reduce VM compute cost significantly — I can calculate 1-yr and 3-yr reserved pricing for you.
+
+If you want me to generate and attach a downloadable CSV or Excel file here, say “Excel please” and I’ll output the file and also paste CSV content (so you can still copy if app download fails).
+
+
+Would you like the cheaper-disk comparison or reserved-instance pricing next?
 
