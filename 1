@@ -1,1 +1,59 @@
 
+
+📨 SMTP Config (8 VMs)
+
+vCPU	Memory (MB)	Disk (GB, external)	Closest Azure Size	Est. Cost (VM + Disk)
+
+4	4096 (~4 GB)	60	D4as v5 (4 vCPU, 16 GB RAM)	~$149/month
+4	4096 (~4 GB)	60	D4as v5	~$149/month
+2	4096 (~4 GB)	60	D2as v5 (2 vCPU, 8 GB RAM)	~$79/month
+2	4096 (~4 GB)	60	D2as v5	~$79/month
+4	4096 (~4 GB)	60	D4as v5	~$149/month
+2	4096 (~4 GB)	60	D2as v5	~$79/month
+2	3500 (~3.5 GB)	60	D2as v5	~$79/month
+4	4096 (~4 GB)	60	D4as v5	~$149/month
+
+
+
+---
+
+📂 SFTP Config (2 VMs)
+
+vCPU	Memory (MB)	Disk (GB, external)	Closest Azure Size	Est. Cost (VM + Disk)
+
+2	4096 (~4 GB)	60	D2as v5	~$79/month
+2	4096 (~4 GB)	60	D2as v5	~$79/month
+
+
+
+---
+
+💰 Estimated Totals
+
+SMTP servers (8 total):
+
+4-core VMs: 4 × $149 = $596
+
+2-core VMs: 4 × $79 = $316
+
+Subtotal = $912/month
+
+
+SFTP servers (2 total):
+
+2 × $79 = $158/month
+
+
+
+➡️ Grand Total ≈ $1,070/month (East US, Ubuntu 22.04, Pay-As-You-Go, each with 60 GB Premium SSD).
+
+
+---
+
+⚠️ Notes:
+
+Azure doesn’t offer 4 vCPU with just 4 GB RAM — the smallest 4-core SKU is 16 GB RAM.
+
+Similarly, 2 vCPU always comes with at least 8 GB RAM. So your requested configs are mapped to the closest real Azure SKUs.
+
+Disk pricing assumes Premium SSD, 60 GB (~$9/month each).
