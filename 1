@@ -1,57 +1,59 @@
+Here’s the cost estimate for 5 VMs, each with 4 vCPU, 16 GB RAM, and an external 100 GB disk (assuming Premium SSD) in East US, Ubuntu Linux (PAYG):
 
 
-Azure VM Cost Estimate Report
+---
 
-1. VM Configuration
+Cost Breakdown
 
-Parameter	Value
+1. VM Compute – 4 vCPU, 16 GB RAM
 
-Region	East US (example)
-OS	Ubuntu Linux
-vCPU	4
-Memory (RAM)	16 GB
-Disk Size	100 GB (Managed)
-Disk Type	Premium SSD (P10 / P20 depending on performance)
+The closest matching SKU (D4as v5 or D4s v5) costs approximately $0.171–$0.192 per hour, which translates to:
+
+Hourly: ~$0.171–0.192
+
+Monthly (~730 hours): $124.8 to $140.2
+— e.g., D4as v5: $141.62/month 
+
+
+2. Premium SSD (100 GB)
+
+Premium SSD disk pricing (P10/P20) generally ranges between:
+
+$0.12–$0.15 per GB per month → Estimated: $12–$15 per 100 GB
+From pricing data (e.g., P30 1 TB at ~$122.88/month) 
+Or derive as ~$0.143/GB using interpolation (512 GB disk at $73.22/month) 
 
 
 
 ---
 
-2. Cost Breakdown (Monthly)
+Summary Cost Table (Per VM and for 5 VMs)
 
-Component	Quantity/Size	Unit Price (USD)	Monthly Cost (USD)
+Item	Per VM Monthly Cost	5 VMs Total Cost
 
-VM Compute (D4as v5 / D4 v3)	1 (4 vCPU, 16 GB RAM)	~ $0.192/hour	~$140.16
-Managed Disk (Premium SSD)	100 GB	~$0.12–$0.15 / GB	~$12–15
-Estimated Total	—	—	$152–$155
+VM Compute	$125 – $142	$625 – $710
+Premium SSD (100 GB)	$12 – $15	$60 – $75
+Estimated Total	$137 – $157	$685 – $785
+
+
+Total Estimate for 5 VMs: between $685 and $785 per month
+
+
+---
+
+Notes & Clarifications
+
+VM cost range reflects pricing variability between $0.171/hr (74.4$/mo) and $0.192/hr (140$/mo); we used the more recent D4as v5 price (~141$/mo) .
+
+The disk cost is estimated using interpolation or typical Premium SSD tiers; actual pricing depends on specific SKU and region.
+
+Does not include: bandwidth, snapshots, OS license, or managed backups.
+
+You can potentially reduce costs with Reserved Instance or Spot pricing.
 
 
 
 ---
 
-3. Notes
+Let me know if you’d like this formatted as a CSV/Excel report, or if you'd like breakdowns based on different disk types or savings plan scenarios!
 
-Pricing is based on Pay-As-You-Go model.
-
-Costs can be reduced with Reserved Instances (1-year or 3-year) or Savings Plans.
-
-Additional charges apply for:
-
-Data egress (outbound traffic)
-
-Snapshots / Backup
-
-Additional disks or premium features
-
-
-
-
----
-
-4. Recommendations
-
-If usage is long-term, consider a 1-year or 3-year Reserved VM, which can cut compute costs by up to 40–60%.
-
-Use Standard SSD instead of Premium SSD if IOPS/throughput needs are low (reduces disk cost).
-
-Regularly monitor in Azure Cost Management to avoid surprises.
