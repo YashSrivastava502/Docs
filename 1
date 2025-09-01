@@ -1,7 +1,3 @@
-while read ipname; do
-  az network public-ip create \
-    --name $ipname \
-    --resource-group MyResourceGroup \
-    --sku Standard \
-    --allocation-method Static
-done < names.txt
+az network public-ip list \
+  --resource-group MyResourceGroup \
+  --query "[].{Name:name, IP:ipAddress}" -o table
