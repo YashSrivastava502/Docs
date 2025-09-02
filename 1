@@ -12,3 +12,10 @@ while read ipname; do
     --sku Standard \
     --allocation-method Static
 done < names.txt
+
+
+az resource list \
+  --resource-group MyResourceGroup \
+  --resource-type "Microsoft.Network/publicIPAddresses" \
+  --query "[?substring(properties.provisioningState,0,10)=='$today'].{Name:name, IP:properties.ipAddress, Created:createdTime}" \
+  -o table
