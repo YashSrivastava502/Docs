@@ -1,1 +1,21 @@
+# ================================
+# Export SCVMM Data to Local CSV
+# ================================
 
+# Load SCVMM PowerShell module
+Import-Module VirtualMachineManager
+
+# Connect to SCVMM server
+Get-SCVMMServer -ComputerName "YourSCVMMServer"
+
+# Define output path
+$csvPath = "C:\Temp\SCVMM_VM_Report.csv"
+
+# Collect VM details and export
+Get-SCVirtualMachine |
+    Select-Object Name, CPUCount, Memory, Status,
+        @{Name="Host";Expression={$_.VMHost.Name}},
+        @{Name="Storage";Expression={($_.VirtualHardDisks | ForEach-Object {$_.StorageVolume.Name}) -join ","}} |
+    Export-Csv -Path $csvPath -NoTypeInformation
+
+Write-Host "SCVMM VM Report saved to $csvPath"
