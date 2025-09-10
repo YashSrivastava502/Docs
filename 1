@@ -1,11 +1,97 @@
-cpu_data = []
-for sh in server_hardware:
+import dash
+from dash import dcc, html, dash_table
+from hpeOneView.oneview_client import OneViewClient
+
+# ---------------- HPE OneView Config ----------------
+config = {
+    "ip": "X.X.X.X",       # OneView IP
+    "credentials": {
+        "userName": "USERNAME",
+        "password": "PASSWORD"
+    }
+}
+
+oneview_client = OneViewClient(config)
+
+# ---------------- Fetch Data Safely ----------------
+def safe_get_logical_enclosures():
     try:
-        server = oneview_client.server_hardware.get_by_uri(sh['uri'])
+        return oneview_client.logical_enclosures.get_all()
+    except:
+        return []
+
+def safe_get_enclosures():
+    try:
+        return oneview_client.enclosures.get_all()
+    except:
+        return []
+
+def safe_get_server_hardware():
+    try:
+        return oneview_client.server_hardware.get_all()
+    except:
+        return []
+
+def safe_get_utilization(server):
+    try:
         util = server.get_utilization(filter='name:CpuUtilization')
-        avg_cpu = 0
-        if util and util.get('metricList'):
-            avg_cpu = util['metricList'][0].get('average', 0)
-        cpu_data.append({"Name": sh.get("name"), "CPU Utilization (%)": avg_cpu})
-    except Exception:
-        cpu_data.append({"Name": sh.get("name"), "CPU Utilization (%)": "N/A"})
+        if util and util.get("metricList"):
+            return util["metricList"][0].get("average", "N/A")
+    except:
+        return "N/A"
+    return "N/A"
+
+# ---------------- Collect Data ----------------
+logical_enclosures = safe_get_logical_enclosures()
+enclosures = safe_get_enclosures()
+server_hardware = safe_get_server_hardware()
+
+# Logical Enclosures Table
+le_data = [{"Name": le.get("name", "N/A"), "State": le.get("state", "N/A")}
+           for le in logical_enclosures]
+
+# Enclosures Table
+enc_data = [{"Name": enc.get("name", "N/A"), "Serial Number": enc.get("serialNumber", "N/A")}
+            for enc in enclosures]
+
+# Server Hardware Table
+sh_data = []
+for sh in server_hardware:
+    server = oneview_client.server_hardware.get_by_uri(sh["uri"])
+    cpu_util = safe_get_utilization(server)
+    sh_data.append({
+        "Name": sh.get("name", "N/A"),
+        "Power State": sh.get("powerState", "N/A"),
+        "CPU Utilization (%)": cpu_util
+    })
+
+# ---------------- Dash App ----------------
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    html.H1("HPE OneView Dashboard"),
+
+    html.H2("Logical Enclosures"),
+    dash_table.DataTable(
+        data=le_data,
+        columns=[{"name": i, "id": i} for i in le_data[0].keys()] if le_data else [],
+        style_table={'overflowX': 'auto'}
+    ),
+
+    html.H2("Enclosures"),
+    dash_table.DataTable(
+        data=enc_data,
+        columns=[{"name": i, "id": i} for i in enc_data[0].keys()] if enc_data else [],
+        style_table={'overflowX': 'auto'}
+    ),
+
+    html.H2("Server Hardware"),
+    dash_table.DataTable(
+        data=sh_data,
+        columns=[{"name": i, "id": i} for i in sh_data[0].keys()] if sh_data else [],
+        style_table={'overflowX': 'auto'}
+    )
+])
+
+if __name__ == "__main__":
+    app.run(debug=True, port=8080)
