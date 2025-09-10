@@ -1,98 +1,16 @@
-from hpeOneView.oneview_client import OneViewClient
-import pandas as pd
-import dash
-from dash import html, dcc, dash_table
-
-# ========== OneView Client Config ==========
-config = {
-    "ip": "<ONEVIEW_IP>",
-    "credentials": {
-        "userName": "<USERNAME>",
-        "password": "<PASSWORD>"
-    }
-}
-
-oneview_client = OneViewClient(config)
-
-# ========== Fetch Data ==========
-
-# 1. Logical Enclosures
-logical_enclosures = oneview_client.logical_enclosures.get_all()
-le_data = [{"Name": le["name"], "URI": le["uri"]} for le in logical_enclosures]
-le_df = pd.DataFrame(le_data)
-
-# 2. Enclosures
-enclosures = oneview_client.enclosures.get_all()
-enclosure_data = [{"Name": e["name"], "Serial": e["serialNumber"], "Model": e["enclosureModel"]}
-                  for e in enclosures]
-enclosure_df = pd.DataFrame(enclosure_data)
-
-# 3. Server Hardware
-server_hardware = oneview_client.server_hardware.get_all()
-server_data = [{"Name": sh["name"], "Model": sh["model"], "Status": sh["state"], "Power": sh["powerState"]}
-               for sh in server_hardware]
-server_df = pd.DataFrame(server_data)
-
-# 4. CPU Utilization (per server)
 cpu_data = []
 for sh in server_hardware:
     util = oneview_client.server_hardware.get_utilization(
-        sh['uri'],
-        fields='CpuUtilization'
+        id_or_uri=sh['uri'],
+        fields=['CpuUtilization']
     )
     avg_cpu = 0
     if util and util.get('metricList'):
         avg_cpu = util['metricList'][0].get('average', 0)
-    cpu_data.append({"Name": sh.get("name"), "CPU Utilization (%)": avg_cpu})
 
-cpu_df = pd.DataFrame(cpu_data)
-
-# Merge Server Info + CPU Utilization
-server_cpu_df = pd.merge(server_df, cpu_df, on="Name", how="left")
-
-# 5. Storage Utilization (per storage system)
-storage_systems = oneview_client.storage_systems.get_all()
-storage_data = []
-for s in storage_systems:
-    total_capacity = s.get('totalCapacity', 0)   # bytes
-    allocated_capacity = s.get('allocatedCapacity', 0)  # bytes
-    free_capacity = total_capacity - allocated_capacity
-    utilization = (allocated_capacity / total_capacity * 100) if total_capacity else 0
-
-    storage_data.append({
-        "Name": s.get("name"),
-        "Model": s.get("model"),
-        "Total (GB)": round(total_capacity / (1024**3), 2),
-        "Allocated (GB)": round(allocated_capacity / (1024**3), 2),
-        "Free (GB)": round(free_capacity / (1024**3), 2),
-        "Utilization (%)": round(utilization, 2)
+    cpu_data.append({
+        "Name": sh.get("name"),
+        "CPU Utilization (%)": avg_cpu
     })
 
-storage_df = pd.DataFrame(storage_data)
-
-# ========== Dash App ==========
-app = dash.Dash(__name__)
-
-def styled_table(df, title):
-    return html.Div([
-        html.H3(title),
-        dash_table.DataTable(
-            data=df.to_dict('records'),
-            columns=[{"name": i, "id": i} for i in df.columns],
-            style_table={'overflowX': 'auto'},
-            style_cell={'textAlign': 'left', 'padding': '5px'},
-            style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'}
-        )
-    ], style={'marginBottom': '30px'})
-
-app.layout = html.Div([
-    html.H1("HPE OneView Dashboard"),
-
-    styled_table(le_df, "Logical Enclosures"),
-    styled_table(enclosure_df, "Enclosures"),
-    styled_table(server_cpu_df, "Server Hardware + CPU Utilization"),
-    styled_table(storage_df, "Storage Utilization")
-])
-
-if __name__ == "__main__":
-    app.run_server(debug=True, port=8050)
+cpu_df = pd.DataFrame(cpu_data)
