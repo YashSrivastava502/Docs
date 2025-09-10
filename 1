@@ -1,17 +1,170 @@
+from hpeOneView.oneview_client import OneViewClient
+import dash
+from dash import html, dcc, dash_table, Input, Output
+import pandas as pd
+import plotly.express as px
+
+# OneView Configuration
+config = {
+    "ip": "10.7.254.50",
+    "credentials": {
+        "userName": "aryaman",
+        "password": "q5)TRctM0J7$F4"
+    }
+}
+oneview_client = OneViewClient(config)
+
+# -----------------------------
+# Fetch data
+# -----------------------------
+logical_enclosures = oneview_client.logical_enclosures.get_all()
+enclosures = oneview_client.enclosures.get_all()
+server_hardware = oneview_client.server_hardware.get_all()
+storage_systems = oneview_client.storage_systems.get_all()
+
+# Logical Enclosures
+le_df = pd.DataFrame([{
+    "Name": le.get("name"),
+    "URI": le.get("uri"),
+    "State": le.get("state")
+} for le in logical_enclosures])
+
+# Enclosures
+enclosure_df = pd.DataFrame([{
+    "Name": e.get("name"),
+    "Model": e.get("model"),
+    "Serial Number": e.get("serialNumber"),
+    "Firmware Version": e.get("firmwareVersion"),
+    "Status": e.get("status"),
+    "URI": e.get("uri")
+} for e in enclosures])
+
+# Server Hardware
+server_df = pd.DataFrame([{
+    "Name": sh.get("name"),
+    "Model": sh.get("model"),
+    "Serial Number": sh.get("serialNumber"),
+    "Power State": sh.get("powerState"),
+    "Status": sh.get("status"),
+    "Processor Count": sh.get("processorCount"),
+    "Firmware": sh.get("mpFirmwareVersion"),
+    "Memory (MB)": sh.get("memoryMb")
+} for sh in server_hardware])
+
+# CPU Utilization
 cpu_data = []
 for sh in server_hardware:
-    util = oneview_client.server_hardware.get_utilization(
-        sh['uri'], 
-        filter='name:CpuUtilization'
-    )
-
-    avg_cpu = 0
-    if util and util.get('metricList'):
-        avg_cpu = util['metricList'][0].get('average', 0)
-
-    cpu_data.append({
-        "Name": sh.get("name"),
-        "CPU Utilization (%)": avg_cpu
-    })
+    try:
+        server = oneview_client.server_hardware.get_by_uri(sh['uri'])
+        util = server.get_utilization(filter='name:CpuUtilization')
+        avg_cpu = 0
+        if util and util.get('metricList'):
+            avg_cpu = util['metricList'][0].get('average', 0)
+        cpu_data.append({"Name": sh.get("name"), "CPU Utilization (%)": avg_cpu})
+    except Exception as ex:
+        cpu_data.append({"Name": sh.get("name"), "CPU Utilization (%)": "N/A"})
 
 cpu_df = pd.DataFrame(cpu_data)
+
+# Merge CPU with Server Hardware
+server_df = server_df.merge(cpu_df, on="Name", how="left")
+
+# Storage Utilization
+storage_data = []
+for s in storage_systems:
+    total_capacity = s.get('totalCapacity', 0)   # bytes
+    allocated_capacity = s.get('allocatedCapacity', 0)  # bytes
+    free_capacity = total_capacity - allocated_capacity
+    utilization = (allocated_capacity / total_capacity * 100) if total_capacity else 0
+
+    storage_data.append({
+        "Name": s.get("name"),
+        "Model": s.get("model"),
+        "Total (GB)": round(total_capacity / (1024**3), 2),
+        "Allocated (GB)": round(allocated_capacity / (1024**3), 2),
+        "Free (GB)": round(free_capacity / (1024**3), 2),
+        "Utilization (%)": round(utilization, 2)
+    })
+
+storage_df = pd.DataFrame(storage_data)
+
+# -----------------------------
+# Charts
+# -----------------------------
+power_state_fig = px.pie(server_df, names='Power State', title='Server Power State Distribution')
+
+status_counts = server_df['Status'].value_counts().reset_index()
+status_counts.columns = ['Status', 'Count']
+status_fig = px.bar(status_counts, x='Status', y='Count', title='Server Status Distribution')
+
+cpu_fig = px.bar(server_df, x='Name', y='CPU Utilization (%)', title='CPU Utilization per Server')
+
+# -----------------------------
+# Dash App
+# -----------------------------
+app = dash.Dash(__name__)
+app.title = "HPE OneView Dashboard"
+
+app.layout = html.Div([
+    dcc.RadioItems(
+        id="theme-toggle",
+        options=[
+            {'label': 'Light Mode', 'value': 'light'},
+            {'label': 'Dark Mode', 'value': 'dark'}
+        ],
+        value='light',
+        labelStyle={'display': 'inline-block', 'marginRight': '15px'},
+        style={'textAlign': 'center', 'marginBottom': '20px'}
+    ),
+    html.Div(id='dashboard-content')
+])
+
+@app.callback(
+    Output('dashboard-content', 'children'),
+    Input('theme-toggle', 'value')
+)
+def update_theme(theme):
+    bg_color = "#f9f9f9" if theme == 'light' else "#1e1e1e"
+    text_color = "#000" if theme == 'light' else "#fefefe"
+    card_color = "#fff" if theme == 'light' else "#2c2c2c"
+    header_color = "#e1e1e1" if theme == 'light' else "#444"
+
+    def styled_table(df, title):
+        return html.Div(
+            style={'backgroundColor': card_color, 'padding': '20px', 'borderRadius': '10px', 'marginBottom': '30px'},
+            children=[
+                html.H2(title),
+                dash_table.DataTable(
+                    columns=[{"name": i, "id": i} for i in df.columns],
+                    data=df.to_dict('records'),
+                    style_table={'overflowX': 'auto', 'maxHeight': '480px', 'overflowY': 'scroll'},
+                    style_cell={'textAlign': 'left', 'backgroundColor': bg_color, 'color': text_color},
+                    style_header={'backgroundColor': header_color, 'color': text_color, 'fontWeight': 'bold'}
+                )
+            ]
+        )
+
+    return html.Div(
+        style={'backgroundColor': bg_color, 'color': text_color, 'padding': '20px'},
+        children=[
+            html.H1("HPE OneView Dashboard", style={'textAlign': 'center'}),
+            styled_table(le_df, "Logical Enclosures"),
+            styled_table(enclosure_df, "Enclosures"),
+            styled_table(server_df, "Server Hardware (with CPU Utilization)"),
+            styled_table(storage_df, "Storage Utilization"),
+            html.Div(style={'display': 'flex', 'gap': '30px', 'flexWrap': 'wrap'}, children=[
+                html.Div(style={'flex': '1', 'minWidth': '300px', 'backgroundColor': card_color, 'padding': '20px', 'borderRadius': '18px'}, children=[
+                    dcc.Graph(figure=power_state_fig)
+                ]),
+                html.Div(style={'flex': '1', 'minWidth': '300px', 'backgroundColor': card_color, 'padding': '20px', 'borderRadius': '18px'}, children=[
+                    dcc.Graph(figure=status_fig)
+                ]),
+                html.Div(style={'flex': '1', 'minWidth': '300px', 'backgroundColor': card_color, 'padding': '20px', 'borderRadius': '18px'}, children=[
+                    dcc.Graph(figure=cpu_fig)
+                ])
+            ])
+        ]
+    )
+
+if __name__ == "__main__":
+    app.run_server(debug=True, port=8050)
