@@ -1,1 +1,16 @@
+while read ipname; do
+  az network public-ip create \
+    --name $ipname \
+    --resource-group MyResourceGroup \
+    --location eastus \
+    --sku Standard \
+    --allocation-method Static \
+    --public-ip-prefix MyPublicIPPrefix
+done < names.txt
+
+
+
+az network public-ip list \
+  --resource-group MyResourceGroup \
+  --query "[].{Name:name, IP:ipAddress, Prefix:publicIpPrefix.id}" -o table
 
