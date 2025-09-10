@@ -1,16 +1,1 @@
-cpu_data = []
-for sh in server_hardware:
-    util = oneview_client.server_hardware.get_utilization(
-        id_or_uri=sh['uri'],
-        fields=['CpuUtilization']
-    )
-    avg_cpu = 0
-    if util and util.get('metricList'):
-        avg_cpu = util['metricList'][0].get('average', 0)
 
-    cpu_data.append({
-        "Name": sh.get("name"),
-        "CPU Utilization (%)": avg_cpu
-    })
-
-cpu_df = pd.DataFrame(cpu_data)
