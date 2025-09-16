@@ -25,3 +25,6 @@ setx PATH "$($env:PATH);C:\Temp\azcopy"
 
 
 "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r "C:\Temp\MyVault.vaultcredentials" /q
+
+
+$vaultKey = Get-ChildItem -Path "C:\Temp" -Filter *.VaultCredentials | Select-Object -First 1; if ($vaultKey) { & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r $vaultKey.FullName /q } else { Write-Host "❌ No VaultCredentials file found in C:\Temp" }
