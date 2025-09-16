@@ -32,3 +32,7 @@ $vaultKey = Get-ChildItem -Path "C:\Temp" -Filter *.VaultCredentials | Select-Ob
 
 
 & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r "C:\Temp\_usel-dr-asr-vault01-tools_Tue_Sep_16_2025.VaultCredentials" /q
+
+
+
+& "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /Credentials "C:\Temp\vaultkey.vaultcredentials" /q
