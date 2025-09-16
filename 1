@@ -1,8 +1,12 @@
-# Extract and Install ASR Provider
-Start-Process "C:\Temp\ASRProvider.exe" "/q /x:C:\Temp\ASR" -Wait
-Start-Process "C:\Temp\ASR\setupdr.exe" "/q /IAcceptEULA" -Wait
+Start-Process "C:\Temp\AzureSiteRecovery Provider.exe" -ArgumentList "/q /x:C:\Temp\ASR" -Wait
+Start-Process "C:\Temp\ASR\setupdr.exe" -ArgumentList "/q /IAcceptEULA" -Wait
 
-# Register Hyper-V host with Vault
+
 & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" `
    /register `
-   /VaultCredentialFile:"C:\Temp\MyVault.VaultCredentials"
+   /VaultCredentialFile:"C:\Temp\use1-dr-asr-vault01_use1-dr-asr-vault@1-tools Tue Sep 16 2025.VaultCredentials"
+
+
+   Rename-Item "C:\Temp\use1-dr-asr-vault01_use1-dr-asr-vault@1-tools Tue Sep 16 2025.VaultCredentials" "C:\Temp\VaultCreds.vaultcredentials"
+
+   & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /register /VaultCredentialFile:"C:\Temp\VaultCreds.vaultcredentials"
