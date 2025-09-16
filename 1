@@ -1,17 +1,8 @@
-Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart
-Restart-Computer
+# Extract and Install ASR Provider
+Start-Process "C:\Temp\ASRProvider.exe" "/q /x:C:\Temp\ASR" -Wait
+Start-Process "C:\Temp\ASR\setupdr.exe" "/q /IAcceptEULA" -Wait
 
-
-# Silent install of Provider
-Start-Process "C:\Installers\ASRProvider.exe" "/q /x:C:\Installers\ASR" -Wait
-
-# Register with Vault
+# Register Hyper-V host with Vault
 & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" `
    /register `
-   /VaultCredentialFile:"C:\Installers\VaultCredentials.vaultcredentials"
-
-
-
-   Start-Process "C:\Installers\MARSAgentInstaller.exe" "/q" -Wait
-
-   
+   /VaultCredentialFile:"C:\Temp\MyVault.VaultCredentials"
