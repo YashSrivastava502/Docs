@@ -10,3 +10,10 @@ Start-Process "C:\Temp\ASR\setupdr.exe" -ArgumentList "/q /IAcceptEULA" -Wait
    Rename-Item "C:\Temp\use1-dr-asr-vault01_use1-dr-asr-vault@1-tools Tue Sep 16 2025.VaultCredentials" "C:\Temp\VaultCreds.vaultcredentials"
 
    & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /register /VaultCredentialFile:"C:\Temp\VaultCreds.vaultcredentials"
+
+
+
+$session = New-PSSession -ComputerName <VM_Public_IP> -Credential (Get-Credential)
+Copy-Item "C:\path\to\file1.txt" -Destination "C:\Temp\" -ToSession $session
+Copy-Item "C:\path\to\file2.txt" -Destination "C:\Temp\" -ToSession $session
+Remove-PSSession $session
