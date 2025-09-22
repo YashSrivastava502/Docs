@@ -31,7 +31,8 @@ def parse_to_dataframe(path):
     except FileNotFoundError:
         return pd.DataFrame(columns=["Server", "Last Reboot"])
 
-    return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
+    df = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
+    return df
 
 def filter_today(df):
     """Filter rows where Last Reboot is today's date."""
@@ -40,13 +41,9 @@ def filter_today(df):
     today = datetime.today().strftime("%Y-%m-%d")
     return df[df["Last Reboot"].str.startswith(today)]
 
-def format_table(df):
-    """Format DataFrame into plain-text table."""
-    return df.to_string(index=False)
-
-def send_mail(message_body):
-    """Send email with the given body."""
-    msg = MIMEText(message_body, "plain")
+def send_mail(html_body):
+    """Send email with the given HTML body."""
+    msg = MIMEText(html_body, "html")
     msg["From"] = SENDER
     msg["To"] = ", ".join(RECIPIENTS)
     msg["Date"] = formatdate(localtime=True)
@@ -56,14 +53,27 @@ def send_mail(message_body):
         smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 if __name__ == "__main__":
+    # Parse the txt file into a DataFrame
     df = parse_to_dataframe(TXT_FILE)
+
+    # Print all fetched data in console
+    if df.empty:
+        print("No data fetched from file.")
+    else:
+        print("All fetched data from file:\n")
+        print(df.to_string(index=False))
+
+    # Filter for today
     today_df = filter_today(df)
 
+    # Prepare email body
     if today_df.empty:
-        body = "Hello Team,\n\nNo server is rebooted."
+        body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
     else:
-        body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
-        body += format_table(today_df)
+        body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
+        # Convert DataFrame to HTML table
+        body += today_df.to_html(index=False, border=1, justify="center")
 
+    # Send email
     send_mail(body)
-    print("Email sent successfully.")
+    print("\nEmail sent successfully.")
