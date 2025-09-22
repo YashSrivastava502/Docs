@@ -7,47 +7,41 @@ from datetime import datetime
 import pandas as pd
 
 # === CONFIGURATION ===
-TXT_FILE = "/tmp/last_reboot_times.txt"
-SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP server
+CSV_FILE = "/tmp/last_reboot_times.txt"  # CSV-formatted file
+SMTP_SERVER = "mail.yourdomain.com"
 SMTP_PORT = 25
 SENDER = "noreply@yourdomain.com"
 RECIPIENTS = ["admin@yourdomain.com"]
 SUBJECT = "Last Reboot Times Report"
 
-def parse_to_dataframe(path):
-    """Parse the text file into a DataFrame with columns: Server, Last Reboot"""
-    servers, reboots = [], []
-
+def read_csv_file(path):
+    """
+    Read CSV file with columns: Server, Last Reboot
+    Example CSV format:
+    Server,Last Reboot
+    NJPVDMZAPPLP157.tools.local,2025-08-29 03:58
+    """
     try:
-        with open(path, "r") as f:
-            lines = [line.strip() for line in f if line.strip()]
+        df = pd.read_csv(path)
+        # Ensure correct column names
+        df.columns = [col.strip() for col in df.columns]
+        return df
     except FileNotFoundError:
+        print(f"File {path} not found.")
+        return pd.DataFrame(columns=["Server", "Last Reboot"])
+    except pd.errors.EmptyDataError:
+        print(f"File {path} is empty.")
         return pd.DataFrame(columns=["Server", "Last Reboot"])
 
-    # Iterate over lines, assume every 2 lines: Server line, system boot line
-    i = 0
-    while i < len(lines) - 1:
-        server_line = lines[i].rstrip(",")
-        boot_line = lines[i+1]
-        if boot_line.lower().startswith("system boot"):
-            reboot_time = boot_line.replace("system boot", "").strip()
-            servers.append(server_line)
-            reboots.append(reboot_time)
-        i += 2
-
-    df = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
-    return df
-
 def filter_today(df):
-    """Filter DataFrame to only include rows with today's date."""
-    today = datetime.today().strftime("%Y-%m-%d")
+    """Filter only rows where Last Reboot date is today."""
     if df.empty:
         return df
-    # Check if 'Last Reboot' starts with today's date
-    return df[df['Last Reboot'].str.startswith(today)]
+    today = datetime.today().strftime("%Y-%m-%d")
+    return df[df['Last Reboot'].astype(str).str.startswith(today)]
 
 def send_mail(html_body):
-    """Send email with HTML content."""
+    """Send HTML email."""
     msg = MIMEText(html_body, "html")
     msg["From"] = SENDER
     msg["To"] = ", ".join(RECIPIENTS)
@@ -58,17 +52,17 @@ def send_mail(html_body):
         smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 if __name__ == "__main__":
-    # Parse file into DataFrame
-    df = parse_to_dataframe(TXT_FILE)
+    # Read CSV file
+    df = read_csv_file(CSV_FILE)
 
-    # Print all fetched data
+    # Print all fetched data in console
     if df.empty:
         print("No data fetched from file.")
     else:
         print("All fetched data:\n")
         print(df.to_string(index=False))
 
-    # Filter only today's reboots
+    # Filter today's reboots
     today_df = filter_today(df)
 
     # Prepare email body
