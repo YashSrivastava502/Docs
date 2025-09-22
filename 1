@@ -38,12 +38,21 @@ def read_txt_file(path):
     return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
 def prepare_email_body(df):
-    """Prepare HTML email body."""
+    """Prepare nice HTML email body with table styling."""
     if df.empty:
         return "<p>Hello Team,</p><p>No server is rebooted.</p>"
     else:
         body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
-        body += df.to_html(index=False, border=1, justify='center')
+        # Add simple table styling
+        style = """
+        <style>
+        table {border-collapse: collapse; width: 60%;}
+        th, td {border: 1px solid black; padding: 8px; text-align: center;}
+        th {background-color: #f2f2f2;}
+        </style>
+        """
+        body += style
+        body += df.to_html(index=False, escape=False)
         return body
 
 def send_mail(body):
