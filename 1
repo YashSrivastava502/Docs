@@ -1,68 +1,153 @@
 #!/usr/bin/env python3
+"""
+Send today's rebooted VMs (from a text file) via SMTP (no-auth).
+- Reads /tmp/last_reboot_times.txt by default
+- Looks for hostname lines (example: hostname.tools.local,) followed by
+  lines like "system boot 2025-09-22 01:20" (seconds optional)
+- Compares the boot date to today's date (server local time)
+- Sends a plain-text table. If none match, sends "No server is rebooted."
+"""
 
+import re
 import smtplib
+import argparse
+import logging
+from datetime import datetime, date
 from email.mime.text import MIMEText
 from email.utils import formatdate
-from datetime import datetime
 
-# === CONFIGURATION ===
-TXT_FILE = "/tmp/last_reboot_times.txt"
-SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
-SMTP_PORT = 25                        # Usually 25
-SENDER = "noreply@yourdomain.com"     # Replace with valid sender
-RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
-SUBJECT = "Last Reboot Times Report"
+HOST_RE = re.compile(r'([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+)')  # matches host.domain.tld
+BOOT_RE = re.compile(r'system boot\s+(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?)', re.I)
 
-def parse_reboot_file(path):
-    """Parse the reboot file and return list of (server, date)."""
-    results = []
+def extract_hostname(line):
+    m = HOST_RE.search(line)
+    if not m:
+        return None
+    return m.group(1).rstrip(',')
+
+def extract_boot_dt(line):
+    m = BOOT_RE.search(line)
+    if not m:
+        return None
+    s = m.group(1)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    # fallback: try to parse with datetime.fromisoformat if available
     try:
-        with open(path, "r") as f:
-            lines = [line.strip() for line in f if line.strip()]
-        # Expect lines like: hostname, then "system boot YYYY-MM-DD HH:MM"
-        for i in range(0, len(lines), 2):
-            if i+1 < len(lines):
-                server = lines[i].rstrip(",")
-                boot_line = lines[i+1]
-                if boot_line.startswith("system boot"):
-                    reboot_date = boot_line.replace("system boot", "").strip()
-                    results.append((server, reboot_date))
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+def parse_reboot_file(path, debug=False):
+    """
+    Parse file and return list of (hostname, boot_datetime).
+    Strategy: scan lines; remember last hostname seen; when we find a 'system boot' line,
+    attach it to the last hostname (or to the previous non-empty line if appropriate).
+    """
+    entries = []
+    pending_host = None
+    prev_nonblank = ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                boot_dt = extract_boot_dt(line)
+                host = extract_hostname(line)
+
+                if host and not boot_dt:
+                    # likely a server line
+                    pending_host = host
+                    prev_nonblank = line
+                    if debug:
+                        logging.debug("Found host: %s", pending_host)
+                elif boot_dt:
+                    # we found a boot timestamp — try to attach to pending_host first,
+                    # else try prev_nonblank to extract a host
+                    attached_host = None
+                    if pending_host:
+                        attached_host = pending_host
+                        pending_host = None
+                    else:
+                        # try prev_nonblank
+                        attached_host = extract_hostname(prev_nonblank) if prev_nonblank else None
+
+                    if attached_host:
+                        entries.append((attached_host, boot_dt))
+                        if debug:
+                            logging.debug("Paired %s -> %s", attached_host, boot_dt)
+                    else:
+                        # unable to attach; try to find a host earlier in file (last fallback: skip)
+                        if debug:
+                            logging.debug("Unattached boot timestamp found: %s (no host found nearby)", boot_dt)
+                    prev_nonblank = line
+                else:
+                    prev_nonblank = line
     except FileNotFoundError:
         return []
-    return results
+    return entries
 
-def filter_today(reboot_list):
-    """Filter only records where reboot date is today."""
-    today = datetime.today().strftime("%Y-%m-%d")
-    return [(srv, dt) for srv, dt in reboot_list if dt.startswith(today)]
+def filter_today(entries):
+    today = date.today()
+    return [(h, dt) for (h, dt) in entries if dt.date() == today]
 
-def format_table(records):
-    """Format records into a table string."""
-    header = f"{'Server':<40} {'Last Reboot':<20}\n"
-    header += "-"*60 + "\n"
-    rows = [f"{srv:<40} {dt}" for srv, dt in records]
-    return header + "\n".join(rows)
+def make_table(records):
+    if not records:
+        return ""
+    # widths
+    srv_col = max(max((len(h) for h, _ in records), default=6), len("Server"))
+    hdr = f"{'Server'.ljust(srv_col)}   Last Reboot\n"
+    hdr += "-" * (srv_col + 3 + len("Last Reboot")) + "\n"
+    rows = []
+    for h, dt in records:
+        rows.append(f"{h.ljust(srv_col)}   {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    return hdr + "\n".join(rows)
 
-def send_mail(message_body):
-    """Send email with given body text."""
-    msg = MIMEText(message_body, "plain")
-    msg["From"] = SENDER
-    msg["To"] = ", ".join(RECIPIENTS)
+def send_mail(smtp_server, smtp_port, sender, recipients, subject, body, timeout=10):
+    msg = MIMEText(body, "plain")
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
     msg["Date"] = formatdate(localtime=True)
-    msg["Subject"] = SUBJECT
+    msg["Subject"] = subject
+    with smtplib.SMTP(smtp_server, smtp_port, timeout=timeout) as s:
+        s.sendmail(sender, recipients, msg.as_string())
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
+def main():
+    parser = argparse.ArgumentParser(description="Send today's rebooted VMs via email (no SMTP auth).")
+    parser.add_argument("--file", "-f", default="/tmp/last_reboot_times.txt", help="Input text file")
+    parser.add_argument("--smtp", default="mail.yourdomain.com", help="SMTP server (no auth)")
+    parser.add_argument("--port", type=int, default=25, help="SMTP port")
+    parser.add_argument("--from", dest="sender", default="noreply@yourdomain.com", help="Sender email")
+    parser.add_argument("--to", dest="recipients", default="admin@yourdomain.com", help="Comma-separated recipients")
+    parser.add_argument("--subject", default="Last Reboot Times Report", help="Email subject")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
 
-if __name__ == "__main__":
-    all_records = parse_reboot_file(TXT_FILE)
-    today_records = filter_today(all_records)
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
+    recipients = [r.strip() for r in args.recipients.split(",") if r.strip()]
 
-    if today_records:
+    entries = parse_reboot_file(args.file, debug=args.debug)
+    if args.debug:
+        logging.debug("All parsed entries: %s", [(h, dt.strftime("%Y-%m-%d %H:%M:%S")) for h, dt in entries])
+
+    today_entries = filter_today(entries)
+
+    if today_entries:
         body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
-        body += format_table(today_records)
+        body += make_table(today_entries)
     else:
         body = "Hello Team,\n\nNo server is rebooted."
 
-    send_mail(body)
-    print("Email sent successfully.")
+    try:
+        send_mail(args.smtp, args.port, args.sender, recipients, args.subject, body)
+        print("Email sent successfully.")
+    except Exception as e:
+        print("Failed to send email:", e)
+
+if __name__ == "__main__":
+    main()
