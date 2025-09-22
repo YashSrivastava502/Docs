@@ -8,14 +8,15 @@ from email.utils import formatdate
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
-CSV_FILE = "/tmp/last_reboot_times.csv"  # CSV version of the TXT
+CSV_FILE = "/tmp/last_reboot_times.csv"          # Converted CSV
+FILTERED_CSV = "/tmp/last_reboot_times_today.csv" # Filtered CSV for today
 SMTP_SERVER = "mail.yourdomain.com"
 SMTP_PORT = 25
 SENDER = "noreply@yourdomain.com"
 RECIPIENTS = ["admin@yourdomain.com"]
 SUBJECT = "Last Reboot Times Report"
 
-# === STEP 1: Parse TXT and save as CSV ===
+# === STEP 1: Convert TXT to CSV ===
 servers, reboots = [], []
 
 try:
@@ -32,10 +33,8 @@ try:
             reboots.append(reboot_time)
         i += 2
 
-    # Save to CSV
     df_csv = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
     df_csv.to_csv(CSV_FILE, index=False)
-
 except FileNotFoundError:
     print(f"{TXT_FILE} not found.")
     df_csv = pd.DataFrame(columns=["Server", "Last Reboot"])
@@ -46,20 +45,17 @@ try:
 except FileNotFoundError:
     df = pd.DataFrame(columns=["Server", "Last Reboot"])
 
-# === STEP 3: Filter in CSV for today's date ===
-today = datetime.today().strftime("%Y-%m-%d")
-
-# Save filtered CSV separately
-FILTERED_CSV = "/tmp/last_reboot_times_today.csv"
-today_df = df[df['Last Reboot'].astype(str).str.startswith(today)]
-today_df.to_csv(FILTERED_CSV, index=False)
-
-# === STEP 4: Print all fetched data in console ===
+# === STEP 3: Print all fetched data ===
 if df.empty:
     print("No data fetched from file.")
 else:
     print("All fetched data:\n")
     print(df.to_string(index=False))
+
+# === STEP 4: Filter in CSV for today's date ===
+today = datetime.today().strftime("%Y-%m-%d")
+today_df = df[df['Last Reboot'].astype(str).str.startswith(today)]
+today_df.to_csv(FILTERED_CSV, index=False)
 
 # === STEP 5: Prepare email body ===
 if today_df.empty:
