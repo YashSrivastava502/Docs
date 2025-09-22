@@ -8,68 +8,69 @@ import re
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
-SMTP_SERVER = "mail.yourdomain.com"
-SMTP_PORT = 25
-SENDER = "noreply@yourdomain.com"
-RECIPIENTS = ["admin@yourdomain.com"]
+SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
+SMTP_PORT = 25                         # Usually 25 or 587
+SENDER = "noreply@yourdomain.com"     # Replace with valid sender
+RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
 SUBJECT = "Last Reboot Times Report"
 
-servers, reboots = [], []
+def read_txt_file(path):
+    """Read TXT file and parse server and last reboot lines."""
+    servers, reboots = [], []
+    try:
+        with open(path, "r") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Check if line looks like a server name
+            if re.match(r'^[A-Za-z0-9.-]+$', line):
+                server_line = line.rstrip(",")
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    if next_line.lower().startswith("system boot"):
+                        reboot_time = next_line.replace("system boot", "").strip()
+                        servers.append(server_line)
+                        reboots.append(reboot_time)
+                        i += 1  # Skip next line as used
+            i += 1
+    except FileNotFoundError:
+        print(f"{path} not found.")
+    return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
-try:
-    with open(TXT_FILE, "r") as f:
-        lines = [line.strip() for line in f if line.strip()]
+def prepare_email_body(df):
+    """Prepare HTML email body grouped by date."""
+    if df.empty:
+        return "<p>Hello Team,</p><p>No server is rebooted.</p>"
+    else:
+        body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs grouped by date:</p>"
+        df['Date'] = df['Last Reboot'].str.extract(r'(\d{4}-\d{2}-\d{2})')
+        for date, group in df.groupby('Date'):
+            body += f"<p><b>Date: {date}</b></p>"
+            body += group[['Server', 'Last Reboot']].to_html(index=False, border=1, justify='center')
+        return body
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # Check if line looks like server (skip lines that look like timestamp garbage)
-        if re.match(r'^[A-Za-z0-9.-]+$', line):
-            server_line = line.rstrip(",")
-            # Check next line exists
-            if i + 1 < len(lines):
-                next_line = lines[i+1]
-                # Check if it starts with 'system boot'
-                if next_line.lower().startswith("system boot"):
-                    reboot_time = next_line.replace("system boot", "").strip()
-                    servers.append(server_line)
-                    reboots.append(reboot_time)
-                    i += 1  # Skip next line as it was used
-        i += 1
+def send_mail(body):
+    """Send HTML email."""
+    msg = MIMEText(body, "html")
+    msg["From"] = SENDER
+    msg["To"] = ", ".join(RECIPIENTS)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Subject"] = SUBJECT
 
-except FileNotFoundError:
-    print(f"{TXT_FILE} not found.")
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
-# === Convert to DataFrame ===
-df = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
+if __name__ == "__main__":
+    df = read_txt_file(TXT_FILE)
 
-# === Print all data in console ===
-if df.empty:
-    print("No data fetched from file.")
-else:
-    print("All fetched data:\n")
-    print(df.to_string(index=False))
+    # Print all fetched data in console
+    if df.empty:
+        print("No data fetched from file.")
+    else:
+        print("All fetched data:\n")
+        print(df.to_string(index=False))
 
-# === Prepare email body ===
-if df.empty:
-    email_body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
-else:
-    email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs grouped by date:</p>"
-    # Extract date part
-    df['Date'] = df['Last Reboot'].str.extract(r'(\d{4}-\d{2}-\d{2})')
-    # Group by date
-    for date, group in df.groupby('Date'):
-        email_body += f"<p><b>Date: {date}</b></p>"
-        email_body += group[['Server', 'Last Reboot']].to_html(index=False, border=1, justify='center')
-
-# === Send email ===
-msg = MIMEText(email_body, "html")
-msg["From"] = SENDER
-msg["To"] = ", ".join(RECIPIENTS)
-msg["Date"] = formatdate(localtime=True)
-msg["Subject"] = SUBJECT
-
-with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-    smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
-
-print("\nEmail sent successfully.")print("\nEmail sent successfully.")
+    email_body = prepare_email_body(df)
+    send_mail(email_body)
+    print("Email sent successfully.")
