@@ -1,6 +1,68 @@
-- task: Bash@3
-  displayName: "Run Python script"
-  inputs:
-    targetType: 'inline'
-    script: |
-      python3 $(System.DefaultWorkingDirectory)/LastRebootLinux/main.py
+#!/usr/bin/env python3
+
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formatdate
+from datetime import datetime
+
+# === CONFIGURATION ===
+TXT_FILE = "/tmp/last_reboot_times.txt"
+SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
+SMTP_PORT = 25                        # Usually 25
+SENDER = "noreply@yourdomain.com"     # Replace with valid sender
+RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
+SUBJECT = "Last Reboot Times Report"
+
+def parse_reboot_file(path):
+    """Parse the reboot file and return list of (server, date)."""
+    results = []
+    try:
+        with open(path, "r") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        # Expect lines like: hostname, then "system boot YYYY-MM-DD HH:MM"
+        for i in range(0, len(lines), 2):
+            if i+1 < len(lines):
+                server = lines[i].rstrip(",")
+                boot_line = lines[i+1]
+                if boot_line.startswith("system boot"):
+                    reboot_date = boot_line.replace("system boot", "").strip()
+                    results.append((server, reboot_date))
+    except FileNotFoundError:
+        return []
+    return results
+
+def filter_today(reboot_list):
+    """Filter only records where reboot date is today."""
+    today = datetime.today().strftime("%Y-%m-%d")
+    return [(srv, dt) for srv, dt in reboot_list if dt.startswith(today)]
+
+def format_table(records):
+    """Format records into a table string."""
+    header = f"{'Server':<40} {'Last Reboot':<20}\n"
+    header += "-"*60 + "\n"
+    rows = [f"{srv:<40} {dt}" for srv, dt in records]
+    return header + "\n".join(rows)
+
+def send_mail(message_body):
+    """Send email with given body text."""
+    msg = MIMEText(message_body, "plain")
+    msg["From"] = SENDER
+    msg["To"] = ", ".join(RECIPIENTS)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Subject"] = SUBJECT
+
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
+
+if __name__ == "__main__":
+    all_records = parse_reboot_file(TXT_FILE)
+    today_records = filter_today(all_records)
+
+    if today_records:
+        body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
+        body += format_table(today_records)
+    else:
+        body = "Hello Team,\n\nNo server is rebooted."
+
+    send_mail(body)
+    print("Email sent successfully.")
