@@ -1,42 +1,6 @@
-#!/usr/bin/env python3
-
-import smtplib
-from email.mime.text import MIMEText
-from email.utils import formatdate
-
-# === CONFIGURATION ===
-TXT_FILE = "/tmp/last_reboot_times.txt"
-SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
-SMTP_PORT = 25                        # Usually 25 or 587
-SENDER = "noreply@yourdomain.com"     # Replace with valid sender
-RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
-SUBJECT = "Last Reboot Times Report"
-
-def read_file(path):
-    """Read contents of the file if exists, else return empty string."""
-    try:
-        with open(path, "r") as f:
-            return f.read().strip()
-    except Exception as e:
-        return f"Error reading file {path}: {e}"
-
-def send_mail(message_body):
-    """Send email with given body text."""
-    msg = MIMEText(message_body, "plain")
-    msg["From"] = SENDER
-    msg["To"] = ", ".join(RECIPIENTS)
-    msg["Date"] = formatdate(localtime=True)
-    msg["Subject"] = SUBJECT
-
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
-
-if __name__ == "__main__":
-    body = read_file(TXT_FILE)
-    if body:
-        message = body
-    else:
-        message = "No server is rebooted."
-
-    send_mail(message)
-    print("Email sent successfully.")
+- task: Bash@3
+  displayName: "Run Python script"
+  inputs:
+    targetType: 'inline'
+    script: |
+      python3 $(System.DefaultWorkingDirectory)/LastRebootLinux/main.py
