@@ -24,14 +24,12 @@ def read_txt_file(path):
         while i < len(lines) - 1:
             server_line = lines[i].rstrip(",")
             next_line = lines[i + 1]
-
             if next_line.lower().startswith("system boot"):
                 reboot_time = next_line.replace("system boot", "").strip()
                 servers.append(server_line)
                 reboots.append(reboot_time)
                 i += 2
             else:
-                # Skip lines that don't match the expected pattern
                 i += 1
 
     except FileNotFoundError:
@@ -40,15 +38,12 @@ def read_txt_file(path):
     return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
 def prepare_email_body(df):
-    """Prepare HTML email body grouped by date."""
+    """Prepare HTML email body."""
     if df.empty:
         return "<p>Hello Team,</p><p>No server is rebooted.</p>"
     else:
-        body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs grouped by date:</p>"
-        df['Date'] = df['Last Reboot'].str[:10]  # Take YYYY-MM-DD part
-        for date, group in df.groupby('Date'):
-            body += f"<p><b>Date: {date}</b></p>"
-            body += group[['Server', 'Last Reboot']].to_html(index=False, border=1, justify='center')
+        body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
+        body += df.to_html(index=False, border=1, justify='center')
         return body
 
 def send_mail(body):
