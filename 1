@@ -1,38 +1,42 @@
-Start-Process "C:\Temp\AzureSiteRecovery Provider.exe" -ArgumentList "/q /x:C:\Temp\ASR" -Wait
-Start-Process "C:\Temp\ASR\setupdr.exe" -ArgumentList "/q /IAcceptEULA" -Wait
+#!/usr/bin/env python3
 
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formatdate
 
-& "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" `
-   /register `
-   /VaultCredentialFile:"C:\Temp\use1-dr-asr-vault01_use1-dr-asr-vault@1-tools Tue Sep 16 2025.VaultCredentials"
+# === CONFIGURATION ===
+TXT_FILE = "/tmp/last_reboot_times.txt"
+SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
+SMTP_PORT = 25                        # Usually 25 or 587
+SENDER = "noreply@yourdomain.com"     # Replace with valid sender
+RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
+SUBJECT = "Last Reboot Times Report"
 
+def read_file(path):
+    """Read contents of the file if exists, else return empty string."""
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        return f"Error reading file {path}: {e}"
 
-   Rename-Item "C:\Temp\use1-dr-asr-vault01_use1-dr-asr-vault@1-tools Tue Sep 16 2025.VaultCredentials" "C:\Temp\VaultCreds.vaultcredentials"
+def send_mail(message_body):
+    """Send email with given body text."""
+    msg = MIMEText(message_body, "plain")
+    msg["From"] = SENDER
+    msg["To"] = ", ".join(RECIPIENTS)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Subject"] = SUBJECT
 
-   & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /register /VaultCredentialFile:"C:\Temp\VaultCreds.vaultcredentials"
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
+if __name__ == "__main__":
+    body = read_file(TXT_FILE)
+    if body:
+        message = body
+    else:
+        message = "No server is rebooted."
 
-
-$session = New-PSSession -ComputerName <VM_Public_IP> -Credential (Get-Credential)
-Copy-Item "C:\path\to\file1.txt" -Destination "C:\Temp\" -ToSession $session
-Copy-Item "C:\path\to\file2.txt" -Destination "C:\Temp\" -ToSession $session
-Remove-PSSession $session
-
-
-Invoke-WebRequest -Uri https://aka.ms/downloadazcopy-v10-windows -OutFile C:\Temp\azcopy.zip
-Expand-Archive C:\Temp\azcopy.zip -DestinationPath C:\Temp\azcopy
-setx PATH "$($env:PATH);C:\Temp\azcopy"
-
-
-"C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r "C:\Temp\MyVault.vaultcredentials" /q
-
-
-$vaultKey = Get-ChildItem -Path "C:\Temp" -Filter *.VaultCredentials | Select-Object -First 1; if ($vaultKey) { & "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r $vaultKey.FullName /q } else { Write-Host "❌ No VaultCredentials file found in C:\Temp" }
-
-
-
-& "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /r "C:\Temp\_usel-dr-asr-vault01-tools_Tue_Sep_16_2025.VaultCredentials" /q
-
-
-
-& "C:\Program Files\Microsoft Azure Site Recovery Provider\DRConfigurator.exe" /Credentials "C:\Temp\vaultkey.vaultcredentials" /q
+    send_mail(message)
+    print("Email sent successfully.")
