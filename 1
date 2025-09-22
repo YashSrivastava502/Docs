@@ -4,7 +4,6 @@ import pandas as pd
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formatdate
-import re
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
@@ -15,27 +14,29 @@ RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
 SUBJECT = "Last Reboot Times Report"
 
 def read_txt_file(path):
-    """Read TXT file and parse server and last reboot lines."""
+    """Read TXT file and parse server + last reboot lines."""
     servers, reboots = [], []
     try:
         with open(path, "r") as f:
             lines = [line.strip() for line in f if line.strip()]
+
         i = 0
-        while i < len(lines):
-            line = lines[i]
-            # Check if line looks like a server name
-            if re.match(r'^[A-Za-z0-9.-]+$', line):
-                server_line = line.rstrip(",")
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1]
-                    if next_line.lower().startswith("system boot"):
-                        reboot_time = next_line.replace("system boot", "").strip()
-                        servers.append(server_line)
-                        reboots.append(reboot_time)
-                        i += 1  # Skip next line as used
-            i += 1
+        while i < len(lines) - 1:
+            server_line = lines[i].rstrip(",")
+            next_line = lines[i + 1]
+
+            if next_line.lower().startswith("system boot"):
+                reboot_time = next_line.replace("system boot", "").strip()
+                servers.append(server_line)
+                reboots.append(reboot_time)
+                i += 2
+            else:
+                # Skip lines that don't match the expected pattern
+                i += 1
+
     except FileNotFoundError:
         print(f"{path} not found.")
+
     return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
 def prepare_email_body(df):
@@ -44,7 +45,7 @@ def prepare_email_body(df):
         return "<p>Hello Team,</p><p>No server is rebooted.</p>"
     else:
         body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs grouped by date:</p>"
-        df['Date'] = df['Last Reboot'].str.extract(r'(\d{4}-\d{2}-\d{2})')
+        df['Date'] = df['Last Reboot'].str[:10]  # Take YYYY-MM-DD part
         for date, group in df.groupby('Date'):
             body += f"<p><b>Date: {date}</b></p>"
             body += group[['Server', 'Last Reboot']].to_html(index=False, border=1, justify='center')
