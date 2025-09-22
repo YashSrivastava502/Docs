@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 
 import pandas as pd
-from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formatdate
-import os
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
-CSV_FILE = "/tmp/last_reboot_times.csv"          # Converted CSV
-FILTERED_CSV = "/tmp/last_reboot_times_today.csv" # Filtered CSV for today
 SMTP_SERVER = "mail.yourdomain.com"
 SMTP_PORT = 25
 SENDER = "noreply@yourdomain.com"
 RECIPIENTS = ["admin@yourdomain.com"]
 SUBJECT = "Last Reboot Times Report"
 
-# === STEP 1: Convert TXT to CSV ===
+# === STEP 1: Parse TXT file ===
 servers, reboots = [], []
 
 try:
@@ -34,38 +30,33 @@ try:
             reboots.append(reboot_time)
         i += 2
 
-    df_csv = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
-    df_csv.to_csv(CSV_FILE, index=False)
 except FileNotFoundError:
     print(f"{TXT_FILE} not found.")
-    df_csv = pd.DataFrame(columns=["Server", "Last Reboot"])
+    servers, reboots = [], []
 
-# === STEP 2: Read CSV ===
-try:
-    df = pd.read_csv(CSV_FILE)
-except FileNotFoundError:
-    df = pd.DataFrame(columns=["Server", "Last Reboot"])
+# === STEP 2: Convert to DataFrame ===
+df = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
-# === STEP 3: Print all fetched data ===
+# === STEP 3: Print all fetched data in console ===
 if df.empty:
     print("No data fetched from file.")
 else:
     print("All fetched data:\n")
     print(df.to_string(index=False))
 
-# === STEP 4: Filter in CSV for today's date ===
-today = datetime.today().strftime("%Y-%m-%d")
-today_df = df[df['Last Reboot'].astype(str).str.startswith(today)]
-today_df.to_csv(FILTERED_CSV, index=False)
-
-# === STEP 5: Prepare email body ===
-if today_df.empty:
+# === STEP 4: Prepare email body ===
+if df.empty:
     email_body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
 else:
-    email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
-    email_body += today_df.to_html(index=False, border=1, justify="center")
+    email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs grouped by date:</p>"
+    # Extract date part (YYYY-MM-DD)
+    df['Date'] = df['Last Reboot'].str.split(' ').str[0]
+    # Group by date
+    for date, group in df.groupby('Date'):
+        email_body += f"<p><b>Date: {date}</b></p>"
+        email_body += group[['Server', 'Last Reboot']].to_html(index=False, border=1, justify='center')
 
-# === STEP 6: Send email ===
+# === STEP 5: Send email ===
 msg = MIMEText(email_body, "html")
 msg["From"] = SENDER
 msg["To"] = ", ".join(RECIPIENTS)
@@ -76,12 +67,3 @@ with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
     smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 print("\nEmail sent successfully.")
-
-# === STEP 7: Delete CSV files ===
-for file in [CSV_FILE, FILTERED_CSV]:
-    try:
-        if os.path.exists(file):
-            os.remove(file)
-            print(f"Deleted file: {file}")
-    except Exception as e:
-        print(f"Error deleting {file}: {e}")
