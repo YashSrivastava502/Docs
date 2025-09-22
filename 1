@@ -5,6 +5,7 @@ from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formatdate
+import os
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
@@ -75,4 +76,12 @@ with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
     smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 print("\nEmail sent successfully.")
-print(f"Filtered CSV saved at {FILTERED_CSV}")
+
+# === STEP 7: Delete CSV files ===
+for file in [CSV_FILE, FILTERED_CSV]:
+    try:
+        if os.path.exists(file):
+            os.remove(file)
+            print(f"Deleted file: {file}")
+    except Exception as e:
+        print(f"Error deleting {file}: {e}")
