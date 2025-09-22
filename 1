@@ -14,41 +14,38 @@ SENDER = "noreply@yourdomain.com"
 RECIPIENTS = ["admin@yourdomain.com"]
 SUBJECT = "Last Reboot Times Report"
 
-def load_reboot_data(path):
-    """Read the file and return a DataFrame with columns [Server, Last Reboot]."""
+def parse_to_dataframe(path):
+    """Read the txt file and convert into DataFrame with Server & Last Reboot."""
+    servers, reboots = [], []
     try:
         with open(path, "r") as f:
             lines = [line.strip() for line in f if line.strip()]
+        for i in range(0, len(lines), 2):
+            if i + 1 < len(lines):
+                server = lines[i].rstrip(",")
+                boot_line = lines[i+1]
+                if boot_line.startswith("system boot"):
+                    reboot_date = boot_line.replace("system boot", "").strip()
+                    servers.append(server)
+                    reboots.append(reboot_date)
     except FileNotFoundError:
         return pd.DataFrame(columns=["Server", "Last Reboot"])
 
-    servers, reboots = [], []
-    for i in range(0, len(lines), 2):
-        if i+1 < len(lines):
-            server = lines[i].rstrip(",")
-            boot_line = lines[i+1]
-            if boot_line.startswith("system boot"):
-                reboot_date = boot_line.replace("system boot", "").strip()
-                servers.append(server)
-                reboots.append(reboot_date)
-
-    df = pd.DataFrame({"Server": servers, "Last Reboot": reboots})
-    # Convert to datetime for filtering
-    if not df.empty:
-        df["Last Reboot"] = pd.to_datetime(df["Last Reboot"], errors="coerce")
-    return df
+    return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
 
 def filter_today(df):
-    """Return only rows where Last Reboot date = today."""
-    today = pd.to_datetime(datetime.today().strftime("%Y-%m-%d"))
-    return df[df["Last Reboot"].dt.date == today.date()]
+    """Filter rows where Last Reboot is today's date."""
+    if df.empty:
+        return df
+    today = datetime.today().strftime("%Y-%m-%d")
+    return df[df["Last Reboot"].str.startswith(today)]
 
 def format_table(df):
-    """Format DataFrame as a plain text table."""
+    """Format DataFrame into plain-text table."""
     return df.to_string(index=False)
 
 def send_mail(message_body):
-    """Send email with given body text."""
+    """Send email with the given body."""
     msg = MIMEText(message_body, "plain")
     msg["From"] = SENDER
     msg["To"] = ", ".join(RECIPIENTS)
@@ -59,98 +56,14 @@ def send_mail(message_body):
         smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 if __name__ == "__main__":
-    df = load_reboot_data(TXT_FILE)
-    df_today = filter_today(df)
+    df = parse_to_dataframe(TXT_FILE)
+    today_df = filter_today(df)
 
-    if not df_today.empty:
-        body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
-        body += format_table(df_today)
-    else:
+    if today_df.empty:
         body = "Hello Team,\n\nNo server is rebooted."
+    else:
+        body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
+        body += format_table(today_df)
 
     send_mail(body)
-    print("Email sent successfully.")                    # we found a boot timestamp — try to attach to pending_host first,
-                    # else try prev_nonblank to extract a host
-                    attached_host = None
-                    if pending_host:
-                        attached_host = pending_host
-                        pending_host = None
-                    else:
-                        # try prev_nonblank
-                        attached_host = extract_hostname(prev_nonblank) if prev_nonblank else None
-
-                    if attached_host:
-                        entries.append((attached_host, boot_dt))
-                        if debug:
-                            logging.debug("Paired %s -> %s", attached_host, boot_dt)
-                    else:
-                        # unable to attach; try to find a host earlier in file (last fallback: skip)
-                        if debug:
-                            logging.debug("Unattached boot timestamp found: %s (no host found nearby)", boot_dt)
-                    prev_nonblank = line
-                else:
-                    prev_nonblank = line
-    except FileNotFoundError:
-        return []
-    return entries
-
-def filter_today(entries):
-    today = date.today()
-    return [(h, dt) for (h, dt) in entries if dt.date() == today]
-
-def make_table(records):
-    if not records:
-        return ""
-    # widths
-    srv_col = max(max((len(h) for h, _ in records), default=6), len("Server"))
-    hdr = f"{'Server'.ljust(srv_col)}   Last Reboot\n"
-    hdr += "-" * (srv_col + 3 + len("Last Reboot")) + "\n"
-    rows = []
-    for h, dt in records:
-        rows.append(f"{h.ljust(srv_col)}   {dt.strftime('%Y-%m-%d %H:%M:%S')}")
-    return hdr + "\n".join(rows)
-
-def send_mail(smtp_server, smtp_port, sender, recipients, subject, body, timeout=10):
-    msg = MIMEText(body, "plain")
-    msg["From"] = sender
-    msg["To"] = ", ".join(recipients)
-    msg["Date"] = formatdate(localtime=True)
-    msg["Subject"] = subject
-    with smtplib.SMTP(smtp_server, smtp_port, timeout=timeout) as s:
-        s.sendmail(sender, recipients, msg.as_string())
-
-def main():
-    parser = argparse.ArgumentParser(description="Send today's rebooted VMs via email (no SMTP auth).")
-    parser.add_argument("--file", "-f", default="/tmp/last_reboot_times.txt", help="Input text file")
-    parser.add_argument("--smtp", default="mail.yourdomain.com", help="SMTP server (no auth)")
-    parser.add_argument("--port", type=int, default=25, help="SMTP port")
-    parser.add_argument("--from", dest="sender", default="noreply@yourdomain.com", help="Sender email")
-    parser.add_argument("--to", dest="recipients", default="admin@yourdomain.com", help="Comma-separated recipients")
-    parser.add_argument("--subject", default="Last Reboot Times Report", help="Email subject")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    args = parser.parse_args()
-
-    if args.debug:
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
-    recipients = [r.strip() for r in args.recipients.split(",") if r.strip()]
-
-    entries = parse_reboot_file(args.file, debug=args.debug)
-    if args.debug:
-        logging.debug("All parsed entries: %s", [(h, dt.strftime("%Y-%m-%d %H:%M:%S")) for h, dt in entries])
-
-    today_entries = filter_today(entries)
-
-    if today_entries:
-        body = "Hello Team,\n\nPlease find the details of the rebooted VMs:\n\n"
-        body += make_table(today_entries)
-    else:
-        body = "Hello Team,\n\nNo server is rebooted."
-
-    try:
-        send_mail(args.smtp, args.port, args.sender, recipients, args.subject, body)
-        print("Email sent successfully.")
-    except Exception as e:
-        print("Failed to send email:", e)
-
-if __name__ == "__main__":
-    main()
+    print("Email sent successfully.")
