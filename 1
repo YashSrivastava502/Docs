@@ -42,7 +42,7 @@ try:
             dates.append(reboot_date)
         i += 2
 
-    # Create DataFrame
+    # Create DataFrame with blank header for last column
     df = pd.DataFrame({
         "Server": servers,
         "Boot Label": labels,
@@ -63,7 +63,12 @@ except FileNotFoundError:
     df_csv = pd.DataFrame(columns=["Server", "Boot Label", "DateTime", ""])
 
 today = datetime.today().strftime("%Y-%m-%d")
-today_df = df_csv[df_csv[""].astype(str) == today]
+
+# Use column index instead of header "" to avoid KeyError
+if not df_csv.empty and df_csv.shape[1] >= 4:
+    today_df = df_csv[df_csv.iloc[:, 3].astype(str) == today]
+else:
+    today_df = pd.DataFrame()
 
 # Save filtered CSV
 today_df.to_csv(FILTERED_CSV, index=False)
