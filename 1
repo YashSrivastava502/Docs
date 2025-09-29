@@ -4,7 +4,11 @@ import pandas as pd
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from email.utils import formatdate
+import os
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
@@ -71,22 +75,42 @@ else:
     print("All fetched data:\n")
     print(df_csv.to_string(index=False))
 
-# === STEP 4: Prepare email ===
+# === STEP 4: Prepare email body ===
 if today_df.empty:
     email_body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
 else:
     email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
     email_body += today_df.to_html(index=False, border=1, justify="center")
 
-# === STEP 5: Send email ===
-msg = MIMEText(email_body, "html")
+# === STEP 5: Prepare email with attachment ===
+msg = MIMEMultipart()
 msg["From"] = SENDER
 msg["To"] = ", ".join(RECIPIENTS)
 msg["Date"] = formatdate(localtime=True)
 msg["Subject"] = SUBJECT
 
+# Attach body
+msg.attach(MIMEText(email_body, "html"))
+
+# Attach filtered CSV (even if empty)
+if os.path.exists(FILTERED_CSV):
+    with open(FILTERED_CSV, "rb") as f:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(FILTERED_CSV)}"')
+    msg.attach(part)
+
+# Send mail
 with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
     smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
 
 print("\nEmail sent successfully.")
-print(f"Filtered CSV saved at {FILTERED_CSV}")
+
+# === STEP 6: Cleanup CSV files ===
+for file in [CSV_FILE, FILTERED_CSV]:
+    try:
+        os.remove(file)
+        print(f"Deleted {file}")
+    except FileNotFoundError:
+        pass
