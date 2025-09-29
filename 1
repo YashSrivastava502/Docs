@@ -1,81 +1,92 @@
 #!/usr/bin/env python3
 
 import pandas as pd
+from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
 # === CONFIGURATION ===
 TXT_FILE = "/tmp/last_reboot_times.txt"
-SMTP_SERVER = "mail.yourdomain.com"   # Replace with your SMTP relay
-SMTP_PORT = 25                         # Usually 25 or 587
-SENDER = "noreply@yourdomain.com"     # Replace with valid sender
-RECIPIENTS = ["admin@yourdomain.com"] # Add recipients here
+CSV_FILE = "/tmp/last_reboot_times.csv"
+FILTERED_CSV = "/tmp/last_reboot_times_today.csv"
+
+SMTP_SERVER = "mail.yourdomain.com"
+SMTP_PORT = 25
+SENDER = "noreply@yourdomain.com"
+RECIPIENTS = ["admin@yourdomain.com"]
 SUBJECT = "Last Reboot Times Report"
 
-def read_txt_file(path):
-    """Read TXT file and parse server + last reboot lines."""
-    servers, reboots = [], []
-    try:
-        with open(path, "r") as f:
-            lines = [line.strip() for line in f if line.strip()]
+# === STEP 1: Convert TXT -> CSV ===
+servers, labels, datetimes, dates = [], [], [], []
 
-        i = 0
-        while i < len(lines) - 1:
-            server_line = lines[i].rstrip(",")
-            next_line = lines[i + 1]
-            if next_line.lower().startswith("system boot"):
-                reboot_time = next_line.replace("system boot", "").strip()
-                servers.append(server_line)
-                reboots.append(reboot_time)
-                i += 2
-            else:
-                i += 1
+try:
+    with open(TXT_FILE, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
 
-    except FileNotFoundError:
-        print(f"{path} not found.")
+    i = 0
+    while i < len(lines) - 1:
+        server_line = lines[i].rstrip(",")
+        boot_line = lines[i + 1]
 
-    return pd.DataFrame({"Server": servers, "Last Reboot": reboots})
+        if boot_line.lower().startswith("system boot"):
+            reboot_time = boot_line.replace("system boot", "").strip()
+            reboot_date = reboot_time.split()[0]  # only YYYY-MM-DD
+            servers.append(server_line)
+            labels.append("system boot")
+            datetimes.append(reboot_time)
+            dates.append(reboot_date)
+        i += 2
 
-def prepare_email_body(df):
-    """Prepare nice HTML email body with table styling."""
-    if df.empty:
-        return "<p>Hello Team,</p><p>No server is rebooted.</p>"
-    else:
-        body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
-        # Add simple table styling
-        style = """
-        <style>
-        table {border-collapse: collapse; width: 60%;}
-        th, td {border: 1px solid black; padding: 8px; text-align: center;}
-        th {background-color: #f2f2f2;}
-        </style>
-        """
-        body += style
-        body += df.to_html(index=False, escape=False)
-        return body
+    # Create DataFrame
+    df = pd.DataFrame({
+        "Server": servers,
+        "Boot Label": labels,
+        "DateTime": datetimes,
+        "": dates   # 4th column has no header
+    })
 
-def send_mail(body):
-    """Send HTML email."""
-    msg = MIMEText(body, "html")
-    msg["From"] = SENDER
-    msg["To"] = ", ".join(RECIPIENTS)
-    msg["Date"] = formatdate(localtime=True)
-    msg["Subject"] = SUBJECT
+    df.to_csv(CSV_FILE, index=False)
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
+except FileNotFoundError:
+    print(f"{TXT_FILE} not found.")
+    df = pd.DataFrame(columns=["Server", "Boot Label", "DateTime", ""])
 
-if __name__ == "__main__":
-    df = read_txt_file(TXT_FILE)
+# === STEP 2: Filtering in CSV ===
+try:
+    df_csv = pd.read_csv(CSV_FILE)
+except FileNotFoundError:
+    df_csv = pd.DataFrame(columns=["Server", "Boot Label", "DateTime", ""])
 
-    # Print all fetched data in console
-    if df.empty:
-        print("No data fetched from file.")
-    else:
-        print("All fetched data:\n")
-        print(df.to_string(index=False))
+today = datetime.today().strftime("%Y-%m-%d")
+today_df = df_csv[df_csv[""].astype(str) == today]
 
-    email_body = prepare_email_body(df)
-    send_mail(email_body)
-    print("Email sent successfully.")
+# Save filtered CSV
+today_df.to_csv(FILTERED_CSV, index=False)
+
+# === STEP 3: Print all data ===
+if df_csv.empty:
+    print("No data fetched from file.")
+else:
+    print("All fetched data:\n")
+    print(df_csv.to_string(index=False))
+
+# === STEP 4: Prepare email ===
+if today_df.empty:
+    email_body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
+else:
+    email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
+    email_body += today_df.to_html(index=False, border=1, justify="center")
+
+# === STEP 5: Send email ===
+msg = MIMEText(email_body, "html")
+msg["From"] = SENDER
+msg["To"] = ", ".join(RECIPIENTS)
+msg["Date"] = formatdate(localtime=True)
+msg["Subject"] = SUBJECT
+
+with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+    smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
+
+print("\nEmail sent successfully.")
+print(f"Filtered CSV saved at {FILTERED_CSV}")
