@@ -1,121 +1,99 @@
-#!/usr/bin/env python3
+Good — here are clear, sourced costs for 60 protected VMs in Azure Site Recovery (ASR) and 70 Standard static IPv4 addresses in East US (monthly).
 
-import pandas as pd
-from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from email.utils import formatdate
-import os
 
-# === CONFIGURATION ===
-TXT_FILE = "/tmp/last_reboot_times.txt"
-CSV_FILE = "/tmp/last_reboot_times.csv"
-FILTERED_CSV = "/tmp/last_reboot_times_today.csv"
+---
 
-SMTP_SERVER = "mail.yourdomain.com"
-SMTP_PORT = 25
-SENDER = "noreply@yourdomain.com"
-RECIPIENTS = ["admin@yourdomain.com"]
-SUBJECT = "Last Reboot Times Report"
+1) Azure Site Recovery — 60 protected instances (monthly)
 
-# === STEP 1: Convert TXT -> CSV ===
-servers, labels, datetimes, dates = [], [], [], []
+Important note: ASR pricing depends on the target and Microsoft’s published tiers:
 
-try:
-    with open(TXT_FILE, "r") as f:
-        lines = [line.strip() for line in f if line.strip()]
+ASR → Azure (replicating to Azure): $25.00 per protected instance / month. 
 
-    i = 0
-    while i < len(lines) - 1:
-        server_line = lines[i].rstrip(",")
-        boot_line = lines[i + 1]
+ASR → customer-owned site (on-prem): $16.00 per protected instance / month. 
 
-        if boot_line.lower().startswith("system boot"):
-            reboot_time = boot_line.replace("system boot", "").strip()
-            reboot_date = reboot_time.split()[0]  # only YYYY-MM-DD
-            servers.append(server_line)
-            labels.append("system boot")
-            datetimes.append(reboot_time)
-            dates.append(reboot_date)
-        i += 2
 
-    # Create DataFrame with blank header for last column
-    df = pd.DataFrame({
-        "Server": servers,
-        "Boot Label": labels,
-        "DateTime": datetimes,
-        "": dates   # 4th column has no header
-    })
+Also: the first 31 days of protection for any newly protected instance are free. Storage used to hold replicated data, storage transactions and egress are billed separately. 
 
-    df.to_csv(CSV_FILE, index=False)
+Monthly cost (60 instances):
 
-except FileNotFoundError:
-    print(f"{TXT_FILE} not found.")
-    df = pd.DataFrame(columns=["Server", "Boot Label", "DateTime", ""])
+If replicating to Azure: 60 × $25 = $1,500.00 / month. 
 
-# === STEP 2: Filtering in CSV ===
-try:
-    df_csv = pd.read_csv(CSV_FILE)
-except FileNotFoundError:
-    df_csv = pd.DataFrame(columns=["Server", "Boot Label", "DateTime", ""])
+If replicating to customer-owned site: 60 × $16 = $960.00 / month. 
 
-today = datetime.today().strftime("%Y-%m-%d")
 
-# Use column index instead of header "" to avoid KeyError
-if not df_csv.empty and df_csv.shape[1] >= 4:
-    today_df = df_csv[df_csv.iloc[:, 3].astype(str) == today]
-else:
-    today_df = pd.DataFrame()
+Notes: these are the ASR service license charges only. You must also account for:
 
-# Save filtered CSV
-today_df.to_csv(FILTERED_CSV, index=False)
+Azure storage consumed by the replicas (managed disks or blob storage)
 
-# === STEP 3: Print all data ===
-if df_csv.empty:
-    print("No data fetched from file.")
-else:
-    print("All fetched data:\n")
-    print(df_csv.to_string(index=False))
+Storage transactions (for replication) and snapshot costs
 
-# === STEP 4: Prepare email body ===
-if today_df.empty:
-    email_body = "<p>Hello Team,</p><p>No server is rebooted.</p>"
-else:
-    email_body = "<p>Hello Team,</p><p>Please find the details of the rebooted VMs:</p>"
-    email_body += today_df.to_html(index=False, border=1, justify="center")
+Egress charges (if applicable)
+I can estimate these too if you provide average protected data per VM (GB) and RPO/RTO settings.
 
-# === STEP 5: Prepare email with attachment ===
-msg = MIMEMultipart()
-msg["From"] = SENDER
-msg["To"] = ", ".join(RECIPIENTS)
-msg["Date"] = formatdate(localtime=True)
-msg["Subject"] = SUBJECT
 
-# Attach body
-msg.attach(MIMEText(email_body, "html"))
 
-# Attach filtered CSV (even if empty)
-if os.path.exists(FILTERED_CSV):
-    with open(FILTERED_CSV, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(FILTERED_CSV)}"')
-    msg.attach(part)
+---
 
-# Send mail
-with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-    smtp.sendmail(SENDER, RECIPIENTS, msg.as_string())
+2) Standard Static Public IPv4 — 70 addresses (monthly)
 
-print("\nEmail sent successfully.")
+Microsoft’s Standard public IPv4 addresses are charged hourly. The commonly used rate (Standard Static IPv4) is $0.005 per IP per hour (Standard SKU). 
 
-# === STEP 6: Cleanup CSV files ===
-for file in [CSV_FILE, FILTERED_CSV]:
-    try:
-        os.remove(file)
-        print(f"Deleted {file}")
-    except FileNotFoundError:
-        pass
+Assuming 730 hours/month:
+
+Cost per IP / month = 0.005 × 730 = $3.65
+
+70 IPs / month = 70 × $3.65 = $255.50
+
+
+So: ~$255.50 / month for 70 Standard static IPv4 addresses. 
+
+Notes:
+
+Charges apply even if an IP is reserved but unattached (check specifics for attached/unattached cases). 
+
+If you need Public IP Prefix (blocks), pricing differs and you may be charged per-IP in the prefix as soon as the prefix is created. 
+
+
+
+---
+
+Total summary (monthly)
+
+Item	Unit price	Qty	Monthly cost
+
+ASR → Azure (protected instance)	$25.00	60	$1,500.00
+ASR → Customer-owned (protected instance)	$16.00	60	$960.00
+Standard Static Public IPv4	$0.005 / hr (~$3.65/mo)	70	$255.50
+
+
+If you choose ASR → Azure + 70 IPs: $1,500.00 + $255.50 = $1,755.50 / month.
+
+If you choose ASR → customer site + 70 IPs: $960.00 + $255.50 = $1,215.50 / month.
+
+
+
+---
+
+Quick CSV (copy–paste into a file, e.g. asr_ip_costs.csv)
+
+Item,Unit,Unit Price (USD),Quantity,Monthly Cost (USD),Notes
+ASR to Azure,per protected instance,25.00,60,1500.00,"ASR license fee to replicate to Azure; storage/egress extra"
+ASR to customer-owned site,per protected instance,16.00,60,960.00,"Alternate: replicate to customer site; storage/egress extra"
+Standard Static Public IPv4,per IP (~730 hrs),0.005/hr,70,255.50,"Standard SKU public IPv4, charged hourly; assumes 730 hrs/month"
+Total_ASR_Azure_plus_IPs, , , ,1755.50,"ASR->Azure + 70 IPs"
+Total_ASR_OnPrem_plus_IPs, , , ,1215.50,"ASR->OnPrem + 70 IPs"
+
+
+---
+
+If you want I can:
+
+Estimate replication storage costs (need average protected GB per VM).
+
+Produce an Excel file with this breakdown (I’ll paste CSV too so you can save it in the app).
+
+Calculate costs using a different hourly-month assumption (e.g., 730 vs 720).
+
+
+Which of those would you like next?
+
