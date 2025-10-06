@@ -1,99 +1,15 @@
-Good — here are clear, sourced costs for 60 protected VMs in Azure Site Recovery (ASR) and 70 Standard static IPv4 addresses in East US (monthly).
+# Short script to add a new DC to existing domain
 
+$DomainName = "corptest.local"
+$Credential = Get-Credential -UserName "CORPTEST\sysadmin" -Message "Enter domain admin password for existing DC"
+$DSRMPassword = ConvertTo-SecureString "Fareportal@123" -AsPlainText -Force
 
----
+Install-ADDSDomainController `
+    -DomainName $DomainName `
+    -Credential $Credential `
+    -InstallDns:$true `
+    -SafeModeAdministratorPassword $DSRMPassword `
+    -GlobalCatalog:$true `
+    -Confirm:$false
 
-1) Azure Site Recovery — 60 protected instances (monthly)
-
-Important note: ASR pricing depends on the target and Microsoft’s published tiers:
-
-ASR → Azure (replicating to Azure): $25.00 per protected instance / month. 
-
-ASR → customer-owned site (on-prem): $16.00 per protected instance / month. 
-
-
-Also: the first 31 days of protection for any newly protected instance are free. Storage used to hold replicated data, storage transactions and egress are billed separately. 
-
-Monthly cost (60 instances):
-
-If replicating to Azure: 60 × $25 = $1,500.00 / month. 
-
-If replicating to customer-owned site: 60 × $16 = $960.00 / month. 
-
-
-Notes: these are the ASR service license charges only. You must also account for:
-
-Azure storage consumed by the replicas (managed disks or blob storage)
-
-Storage transactions (for replication) and snapshot costs
-
-Egress charges (if applicable)
-I can estimate these too if you provide average protected data per VM (GB) and RPO/RTO settings.
-
-
-
----
-
-2) Standard Static Public IPv4 — 70 addresses (monthly)
-
-Microsoft’s Standard public IPv4 addresses are charged hourly. The commonly used rate (Standard Static IPv4) is $0.005 per IP per hour (Standard SKU). 
-
-Assuming 730 hours/month:
-
-Cost per IP / month = 0.005 × 730 = $3.65
-
-70 IPs / month = 70 × $3.65 = $255.50
-
-
-So: ~$255.50 / month for 70 Standard static IPv4 addresses. 
-
-Notes:
-
-Charges apply even if an IP is reserved but unattached (check specifics for attached/unattached cases). 
-
-If you need Public IP Prefix (blocks), pricing differs and you may be charged per-IP in the prefix as soon as the prefix is created. 
-
-
-
----
-
-Total summary (monthly)
-
-Item	Unit price	Qty	Monthly cost
-
-ASR → Azure (protected instance)	$25.00	60	$1,500.00
-ASR → Customer-owned (protected instance)	$16.00	60	$960.00
-Standard Static Public IPv4	$0.005 / hr (~$3.65/mo)	70	$255.50
-
-
-If you choose ASR → Azure + 70 IPs: $1,500.00 + $255.50 = $1,755.50 / month.
-
-If you choose ASR → customer site + 70 IPs: $960.00 + $255.50 = $1,215.50 / month.
-
-
-
----
-
-Quick CSV (copy–paste into a file, e.g. asr_ip_costs.csv)
-
-Item,Unit,Unit Price (USD),Quantity,Monthly Cost (USD),Notes
-ASR to Azure,per protected instance,25.00,60,1500.00,"ASR license fee to replicate to Azure; storage/egress extra"
-ASR to customer-owned site,per protected instance,16.00,60,960.00,"Alternate: replicate to customer site; storage/egress extra"
-Standard Static Public IPv4,per IP (~730 hrs),0.005/hr,70,255.50,"Standard SKU public IPv4, charged hourly; assumes 730 hrs/month"
-Total_ASR_Azure_plus_IPs, , , ,1755.50,"ASR->Azure + 70 IPs"
-Total_ASR_OnPrem_plus_IPs, , , ,1215.50,"ASR->OnPrem + 70 IPs"
-
-
----
-
-If you want I can:
-
-Estimate replication storage costs (need average protected GB per VM).
-
-Produce an Excel file with this breakdown (I’ll paste CSV too so you can save it in the app).
-
-Calculate costs using a different hourly-month assumption (e.g., 730 vs 720).
-
-
-Which of those would you like next?
-
+Write-Host "Domain Controller promotion started on this server."
