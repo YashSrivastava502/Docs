@@ -1,19 +1,9 @@
-# Add a new DC to existing domain (corptest.local)
-
-$DomainName = "corptest.local"
-$Credential = Get-Credential -UserName "CORPTEST\sysadmin" -Message "Enter domain admin password for existing DC"
-$DSRMPassword = ConvertTo-SecureString "Fareportal@123" -AsPlainText -Force
-
 Install-ADDSDomainController `
-    -DomainName $DomainName `
-    -Credential $Credential `
-    -InstallDns:$true `
-    -SafeModeAdministratorPassword $DSRMPassword `
-    -Confirm:$false
-
-Write-Host "Domain Controller promotion started on this server."
-
-
-
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-.\AddNewDC.ps1
+  -DomainName "yourdomain.local" `
+  -InstallDns `
+  -SiteName "Default-First-Site-Name" `
+  -Credential (Get-Credential) `
+  -DatabasePath "C:\Windows\NTDS" `
+  -LogPath "C:\Windows\NTDS" `
+  -SysvolPath "C:\Windows\SYSVOL" `
+  -Force
