@@ -1,15 +1,1 @@
-# Short script to add a new DC to existing domain
 
-$DomainName = "corptest.local"
-$Credential = Get-Credential -UserName "CORPTEST\sysadmin" -Message "Enter domain admin password for existing DC"
-$DSRMPassword = ConvertTo-SecureString "Fareportal@123" -AsPlainText -Force
-
-Install-ADDSDomainController `
-    -DomainName $DomainName `
-    -Credential $Credential `
-    -InstallDns:$true `
-    -SafeModeAdministratorPassword $DSRMPassword `
-    -GlobalCatalog:$true `
-    -Confirm:$false
-
-Write-Host "Domain Controller promotion started on this server."
