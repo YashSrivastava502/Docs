@@ -1,9 +1,8 @@
 Install-ADDSDomainController `
-  -DomainName "yourdomain.local" `
-  -InstallDns `
-  -SiteName "Default-First-Site-Name" `
+  -DomainName "fptest.com.local" `
   -Credential (Get-Credential) `
-  -DatabasePath "C:\Windows\NTDS" `
-  -LogPath "C:\Windows\NTDS" `
-  -SysvolPath "C:\Windows\SYSVOL" `
-  -Force
+  -ReplicationSourceDC "use1-dr-fp-com-local.fptest.com.local" `
+  -SiteName "Default-First-Site-Name" `
+  -InstallDns:$true `
+  -NoGlobalCatalog:$false `
+  -SafeModeAdministratorPassword (Read-Host -AsSecureString "Enter DSRM Password")
