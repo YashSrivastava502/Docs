@@ -1,8 +1,2 @@
-Install-ADDSDomainController `
-  -DomainName "fptest.com.local" `
-  -Credential (Get-Credential) `
-  -ReplicationSourceDC "use1-dr-fp-com-local.fptest.com.local" `
-  -SiteName "Default-First-Site-Name" `
-  -InstallDns:$true `
-  -NoGlobalCatalog:$false `
-  -SafeModeAdministratorPassword (Read-Host -AsSecureString "Enter DSRM Password")
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters" `
+-Name "AllowNT4Crypto" -Value 1 -Type DWORD
