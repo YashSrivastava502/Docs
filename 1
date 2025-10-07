@@ -1,2 +1,31 @@
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters" `
--Name "AllowNT4Crypto" -Value 1 -Type DWORD
+dcdiag /v /c /d /e > C:\dcdiag_report.txt
+repadmin /replsummary
+repadmin /showrepl
+
+
+repadmin /syncall /AeD
+
+
+w32tm /query /status
+
+
+w32tm /resync /force
+
+
+Add-Computer -DomainName corptest.local -Credential CORPTEST\AdminUser -Verbose
+
+Install-ADDSDomainController `
+ -DomainName "corptest.local" `
+ -InstallDns `
+ -Credential (Get-Credential) `
+ -SiteName "Default-First-Site-Name" `
+ -NoGlobalCatalog:$false `
+ -DatabasePath "C:\Windows\NTDS" `
+ -LogPath "C:\Windows\NTDS" `
+ -SysvolPath "C:\Windows\SYSVOL" `
+ -Force
+
+
+ dcdiag /test:dns
+repadmin /replsummary
+Get-ADDomainController -Filter *
