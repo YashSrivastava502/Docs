@@ -1,26 +1,30 @@
-# ==========================
+# ===========================================
+# DNS Failover Script (Final Version)
+# ===========================================
+# Author: Yash Srivastava
+# Purpose: Automatic DNS Failover when DC1 is unreachable
+# Run Location: DC2 (Cloud)
+# ===========================================
 
-# Config
 $DC1 = "USE1-DR-DC1"
 $BackupFile = "C:\Scripts\Original_A_Records_Backup.csv"
-$DRCsv = "C:\Scripts\dr_records.csv"  # Contains columns: Name, Zone, IP
+$DRCsv = "C:\Scripts\dr_records.csv"   # Columns: Name, Zone, IP
 
-# Step 1: Check DC1 connectivity
-Write-Host "Checking connectivity to $DC1..."
+Write-Host "`n--- Checking DC1 connectivity ---"
 if (Test-Connection -ComputerName $DC1 -Count 2 -Quiet) {
-    Write-Host "DC1 is reachable. Failover not required."
+    Write-Host "DC1 is reachable. Failover not required." -ForegroundColor Green
     exit
 } else {
-    Write-Host "DC1 is unreachable. Running Failover Mode..."
+    Write-Host "DC1 is unreachable. Initiating Failover..." -ForegroundColor Yellow
 }
 
-# Step 2: Backup existing A records from all zones
-Write-Host "Backing up existing A records..."
+# Step 1: Backup all A records
+Write-Host "`n--- Backing up existing A records ---"
 $zones = Get-DnsServerZone
 $backup = @()
 
 foreach ($zone in $zones) {
-    $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType "A"
+    $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType "A" -ErrorAction SilentlyContinue
     foreach ($rec in $records) {
         $backup += [PSCustomObject]@{
             Zone = $zone.ZoneName
@@ -31,42 +35,45 @@ foreach ($zone in $zones) {
 }
 
 $backup | Export-Csv -Path $BackupFile -NoTypeInformation
-Write-Host "Backup completed: $BackupFile"
+Write-Host "A record backup saved to $BackupFile" -ForegroundColor Cyan
 
-# Step 3: Create DR A Records from dr_records.csv
-Write-Host "Creating DR A records..."
+# Step 2: Create DR A records from dr_records.csv
+Write-Host "`n--- Creating DR A records ---"
 $drRecords = Import-Csv $DRCsv
+
 foreach ($dr in $drRecords) {
     try {
         Add-DnsServerResourceRecordA -ZoneName $dr.Zone -Name $dr.Name -IPv4Address $dr.IP -ErrorAction Stop
-        Write-Host "DR A record created: $($dr.Name).$($dr.Zone) → $($dr.IP)"
+        Write-Host "DR record created: $($dr.Name).$($dr.Zone) → $($dr.IP)"
     } catch {
         Write-Warning "DR record $($dr.Name) may already exist or failed to create."
     }
 }
 
-# Step 4: Create CNAMEs pointing original hostnames to DR records
-Write-Host "Creating CNAMEs for failover..."
+# Step 3: Create CNAMEs for original records → DR records and delete originals
+Write-Host "`n--- Creating CNAMEs and deleting original A records ---"
+
 foreach ($rec in $backup) {
-    $drName = "cloud" + $rec.Name
+    $drName = "$($rec.Name)-dr"
     $zone = $rec.Zone
 
-    # Check if corresponding DR A record exists
+    # Check if DR A record exists
     $drExists = Get-DnsServerResourceRecord -ZoneName $zone -Name $drName -ErrorAction SilentlyContinue
     if ($drExists) {
         try {
+            # Create CNAME with same name as original record
             Add-DnsServerResourceRecordCName -ZoneName $zone -Name $rec.Name -HostNameAlias "$drName.$zone" -ErrorAction Stop
             Write-Host "CNAME created: $($rec.Name) → $drName.$zone"
 
-            # Delete original A record (only if CNAME created successfully)
+            # Delete the original A record (since it's replaced by CNAME)
             Remove-DnsServerResourceRecord -ZoneName $zone -Name $rec.Name -RRType "A" -Force -ErrorAction SilentlyContinue
             Write-Host "Deleted original A record: $($rec.Name).$zone"
         } catch {
-            Write-Warning "Failed to create CNAME for $($rec.Name)."
+            Write-Warning "Failed to create CNAME for $($rec.Name) in $zone."
         }
     } else {
-        Write-Warning "No DR record for $($rec.Name); skipping deletion."
+        Write-Warning "No DR record found for $($rec.Name); skipping."
     }
 }
 
-Write-Host "Failover completed successfully!"
+Write-Host "`nFailover completed successfully!" -ForegroundColor Green
