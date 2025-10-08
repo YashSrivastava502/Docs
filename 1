@@ -1,26 +1,31 @@
 $dc1 = "NJPVDCTEST01"
 $zones = (Get-DnsServerZone).ZoneName
-$backupFile = "C:\Scripts\original-records.csv"
+$backupFile = "C:\Scripts\all-dns-records-backup.csv"
 
 Write-Host "Checking connectivity to $dc1..."
 if (Test-Connection -ComputerName $dc1 -Count 1 -Quiet) {
-    Write-Host "DC1 is reachable. No failover needed."
+    Write-Host "✅ DC1 is reachable. No failover needed."
     exit
 }
 
-Write-Host "DC1 is unreachable. Running Failover Mode."
+Write-Host "❌ DC1 is unreachable. Running Failover Mode..."
 
-# Step 1: Backup all existing A records
-$records = foreach ($zone in $zones) {
-    Get-DnsServerResourceRecord -ZoneName $zone -RRType "A" |
-    Where-Object { $_.HostName -notmatch '-dr$' } | # exclude DR records
-    Select-Object HostName, RecordData, ZoneName
+# Step 1: Backup all records (A, CNAME, etc.) from all zones
+Write-Host "Backing up all DNS records..."
+$allRecords = foreach ($zone in $zones) {
+    Get-DnsServerResourceRecord -ZoneName $zone |
+    Select-Object @{Name='ZoneName';Expression={$zone}},
+                  @{Name='RecordType';Expression={$_.RecordType}},
+                  @{Name='HostName';Expression={$_.HostName}},
+                  @{Name='RecordData';Expression={$_.RecordData}}
 }
-$records | Export-Csv -Path $backupFile -NoTypeInformation
-Write-Host "A record backup saved to $backupFile"
+$allRecords | Export-Csv -Path $backupFile -NoTypeInformation
+Write-Host "🗂️ All DNS records backup saved to: $backupFile"
 
-# Step 2: Create CNAMEs pointing to DR records and delete original A records
-foreach ($rec in $records) {
+# Step 2: For each A record (excluding -dr) → create CNAME pointing to -dr and delete A
+Write-Host "Processing failover logic..."
+
+foreach ($rec in $allRecords | Where-Object { $_.RecordType -eq 'A' -and $_.HostName -notmatch '-dr$' }) {
     $zone = $rec.ZoneName
     $name = $rec.HostName
     $drName = "$name-dr"
@@ -31,14 +36,14 @@ foreach ($rec in $records) {
         try {
             Add-DnsServerResourceRecordCName -ZoneName $zone -Name $name -HostNameAlias "$drName.$zone" -ErrorAction Stop
             Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType "A" -Force
-            Write-Host "✅ Created CNAME for $name → $drName"
+            Write-Host "✅ Created CNAME for $name → $drName in zone $zone"
         }
         catch {
             Write-Warning "⚠️ Failed to create CNAME for $name in $zone: $($_.Exception.Message)"
         }
     } else {
-        Write-Warning "⚠️ No DR record found for $name in $zone, skipping."
+        Write-Warning "⚠️ No DR record found for $name in $zone — skipping."
     }
 }
 
-Write-Host "Failover completed successfully!"
+Write-Host "🏁 Failover completed successfully!"
