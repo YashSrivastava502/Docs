@@ -1,31 +1,72 @@
-dcdiag /v /c /d /e > C:\dcdiag_report.txt
-repadmin /replsummary
-repadmin /showrepl
+# ==========================
 
+# Config
+$DC1 = "USE1-DR-DC1"
+$BackupFile = "C:\Scripts\Original_A_Records_Backup.csv"
+$DRCsv = "C:\Scripts\dr_records.csv"  # Contains columns: Name, Zone, IP
 
-repadmin /syncall /AeD
+# Step 1: Check DC1 connectivity
+Write-Host "Checking connectivity to $DC1..."
+if (Test-Connection -ComputerName $DC1 -Count 2 -Quiet) {
+    Write-Host "DC1 is reachable. Failover not required."
+    exit
+} else {
+    Write-Host "DC1 is unreachable. Running Failover Mode..."
+}
 
+# Step 2: Backup existing A records from all zones
+Write-Host "Backing up existing A records..."
+$zones = Get-DnsServerZone
+$backup = @()
 
-w32tm /query /status
+foreach ($zone in $zones) {
+    $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType "A"
+    foreach ($rec in $records) {
+        $backup += [PSCustomObject]@{
+            Zone = $zone.ZoneName
+            Name = $rec.HostName
+            IP   = $rec.RecordData.IPv4Address.ToString()
+        }
+    }
+}
 
+$backup | Export-Csv -Path $BackupFile -NoTypeInformation
+Write-Host "Backup completed: $BackupFile"
 
-w32tm /resync /force
+# Step 3: Create DR A Records from dr_records.csv
+Write-Host "Creating DR A records..."
+$drRecords = Import-Csv $DRCsv
+foreach ($dr in $drRecords) {
+    try {
+        Add-DnsServerResourceRecordA -ZoneName $dr.Zone -Name $dr.Name -IPv4Address $dr.IP -ErrorAction Stop
+        Write-Host "DR A record created: $($dr.Name).$($dr.Zone) → $($dr.IP)"
+    } catch {
+        Write-Warning "DR record $($dr.Name) may already exist or failed to create."
+    }
+}
 
+# Step 4: Create CNAMEs pointing original hostnames to DR records
+Write-Host "Creating CNAMEs for failover..."
+foreach ($rec in $backup) {
+    $drName = "cloud" + $rec.Name
+    $zone = $rec.Zone
 
-Add-Computer -DomainName corptest.local -Credential CORPTEST\AdminUser -Verbose
+    # Check if corresponding DR A record exists
+    $drExists = Get-DnsServerResourceRecord -ZoneName $zone -Name $drName -ErrorAction SilentlyContinue
+    if ($drExists) {
+        try {
+            Add-DnsServerResourceRecordCName -ZoneName $zone -Name $rec.Name -HostNameAlias "$drName.$zone" -ErrorAction Stop
+            Write-Host "CNAME created: $($rec.Name) → $drName.$zone"
 
-Install-ADDSDomainController `
- -DomainName "corptest.local" `
- -InstallDns `
- -Credential (Get-Credential) `
- -SiteName "Default-First-Site-Name" `
- -NoGlobalCatalog:$false `
- -DatabasePath "C:\Windows\NTDS" `
- -LogPath "C:\Windows\NTDS" `
- -SysvolPath "C:\Windows\SYSVOL" `
- -Force
+            # Delete original A record (only if CNAME created successfully)
+            Remove-DnsServerResourceRecord -ZoneName $zone -Name $rec.Name -RRType "A" -Force -ErrorAction SilentlyContinue
+            Write-Host "Deleted original A record: $($rec.Name).$zone"
+        } catch {
+            Write-Warning "Failed to create CNAME for $($rec.Name)."
+        }
+    } else {
+        Write-Warning "No DR record for $($rec.Name); skipping deletion."
+    }
+}
 
-
- dcdiag /test:dns
-repadmin /replsummary
-Get-ADDomainController -Filter *
+Write-Host "Failover completed successfully!"
