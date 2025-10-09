@@ -1,17 +1,24 @@
-$dc1 = "NJPVDCTEST01"
-$zones = (Get-DnsServerZone).ZoneName
+# ==============================
+# DNS Failover Script
+# Author: Yash Srivastava (POC)
+# ==============================
+
+$dc1 = "NJPVDCTEST01"              # Primary DC to monitor
 $backupFile = "C:\Scripts\all-dns-records-backup.csv"
 
-Write-Host "Checking connectivity to $dc1..."
+Write-Host "🔍 Checking connectivity to $dc1..."
 if (Test-Connection -ComputerName $dc1 -Count 1 -Quiet) {
-    Write-Host "✅ DC1 is reachable. No failover needed."
+    Write-Host "✅ DC1 is reachable. No failover required."
     exit
 }
 
 Write-Host "❌ DC1 is unreachable. Running Failover Mode..."
+Start-Sleep -Seconds 2
 
-# Step 1: Backup all records (A, CNAME, etc.) from all zones
-Write-Host "Backing up all DNS records..."
+# Step 1: Backup all DNS records
+Write-Host "📦 Taking backup of all DNS records..."
+$zones = (Get-DnsServerZone).ZoneName
+
 $allRecords = foreach ($zone in $zones) {
     Get-DnsServerResourceRecord -ZoneName $zone |
     Select-Object @{Name='ZoneName';Expression={$zone}},
@@ -19,31 +26,38 @@ $allRecords = foreach ($zone in $zones) {
                   @{Name='HostName';Expression={$_.HostName}},
                   @{Name='RecordData';Expression={$_.RecordData}}
 }
+
 $allRecords | Export-Csv -Path $backupFile -NoTypeInformation
-Write-Host "🗂️ All DNS records backup saved to: $backupFile"
+Write-Host "🗂️ Backup saved to: $backupFile"
+Start-Sleep -Seconds 2
 
-# Step 2: For each A record (excluding -dr) → create CNAME pointing to -dr and delete A
-Write-Host "Processing failover logic..."
-
+# Step 2: Create CNAME for each original A record → -dr
+Write-Host "🔁 Creating CNAMEs for A records (excluding -dr)..."
 foreach ($rec in $allRecords | Where-Object { $_.RecordType -eq 'A' -and $_.HostName -notmatch '-dr$' }) {
+
     $zone = $rec.ZoneName
     $name = $rec.HostName
     $drName = "$name-dr"
 
-    # Check if DR record exists
-    $drRecord = Get-DnsServerResourceRecord -ZoneName $zone -Name $drName -ErrorAction SilentlyContinue
-    if ($drRecord) {
-        try {
-            Add-DnsServerResourceRecordCName -ZoneName $zone -Name $name -HostNameAlias "$drName.$zone" -ErrorAction Stop
-            Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType "A" -Force
-            Write-Host "✅ Created CNAME for $name → $drName in zone $zone"
-        }
-        catch {
-            Write-Warning "⚠️ Failed to create CNAME for $name in $zone: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Warning "⚠️ No DR record found for $name in $zone — skipping."
+    # Check if corresponding DR record exists
+    $drExists = Get-DnsServerResourceRecord -ZoneName $zone -Name $drName -ErrorAction SilentlyContinue
+    if ($null -eq $drExists) {
+        Write-Warning "⚠️ No DR A record found for $name in $zone. Skipping."
+        continue
+    }
+
+    try {
+        # Create CNAME record pointing to -dr
+        Add-DnsServerResourceRecordCName -ZoneName $zone -Name $name -HostNameAlias "$drName.$zone" -ErrorAction Stop
+        Write-Host "✅ Created CNAME: $name → $drName.$zone"
+
+        # Delete original A record after successful CNAME creation
+        Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType "A" -Force
+        Write-Host "🗑️ Deleted original A record: $name in $zone"
+    }
+    catch {
+        Write-Warning "⚠️ Failed for $name in $zone: $($_.Exception.Message)"
     }
 }
 
-Write-Host "🏁 Failover completed successfully!"
+Write-Host "🏁 Failover process completed successfully!"
