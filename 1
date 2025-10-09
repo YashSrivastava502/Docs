@@ -1,38 +1,74 @@
-# Step 3: Restore original A records from backup CSV when DC1 is reachable
-Write-Host "DC1 is reachable. Running Fallback Mode..."
+# ===============================
+# DNS Fallback / Restore Script
+# ===============================
 
-if (Test-Path $backupFile) {
-    $records = Import-Csv $backupFile
+$dc1 = "usel-pr-dc1"  # Primary DC name
+$dnsServer = $env:COMPUTERNAME
+$backupPath = "C:\Scripts\original-records.csv"
 
-    foreach ($record in $records) {
-        $zoneName = $record.Zone
-        $name = $record.Name
-        $type = $record.Type
-        $data = $record.Data
+# Check if DC1 is reachable
+if (Test-Connection -ComputerName $dc1 -Count 2 -Quiet) {
+    Write-Host "DC1 is reachable. Running Fallback Mode..." -ForegroundColor Cyan
 
-        try {
-            # Only restore A records with valid IP addresses
-            if ($type -eq "A" -and $data -match "^\d{1,3}(\.\d{1,3}){3}$") {
-                # Delete any existing CNAME (failover record)
-                $existingCname = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $name -RRType CNAME -ErrorAction SilentlyContinue
-                if ($existingCname) {
-                    Remove-DnsServerResourceRecord -ZoneName $zoneName -RRType CNAME -Name $name -Force -ErrorAction SilentlyContinue
-                    Write-Host "Deleted CNAME for $name in $zoneName"
-                }
-
-                # Add original A record back
-                Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $name -IPv4Address $data -TimeToLive 01:00:00 -ErrorAction Stop
-                Write-Host "Restored A record: $name -> $data in $zoneName"
-            }
-            else {
-                Write-Warning "Skipping invalid or missing IP for $name in $zoneName"
-            }
-        }
-        catch {
-            Write-Warning "Error restoring $name in $zoneName: $($_.Exception.Message)"
+    # Step 1: Delete all CNAMEs from all zones
+    Write-Host "`n--- Step 1: Removing all CNAME records ---"
+    $zones = Get-DnsServerZone
+    foreach ($zone in $zones) {
+        $cnameRecords = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType CNAME -ErrorAction SilentlyContinue
+        foreach ($cname in $cnameRecords) {
+            Remove-DnsServerResourceRecord -ZoneName $zone.ZoneName -Name $cname.HostName -RRType CNAME -Force -ErrorAction SilentlyContinue
+            Write-Host "Deleted CNAME: $($cname.HostName) in zone $($zone.ZoneName)"
         }
     }
+
+    # Step 2: Delete DR A records (ending in -dr)
+    Write-Host "`n--- Step 2: Removing DR A records (with -dr suffix) ---"
+    foreach ($zone in $zones) {
+        $aRecords = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -RRType A -ErrorAction SilentlyContinue
+        foreach ($a in $aRecords) {
+            if ($a.HostName -like "*-dr") {
+                Remove-DnsServerResourceRecord -ZoneName $zone.ZoneName -Name $a.HostName -RRType A -Force -ErrorAction SilentlyContinue
+                Write-Host "Deleted DR A Record: $($a.HostName) in zone $($zone.ZoneName)"
+            }
+        }
+    }
+
+    # Step 3: Restore original A records from backup CSV
+    Write-Host "`n--- Step 3: Restoring original A records from backup CSV ---"
+
+    if (Test-Path $backupPath) {
+        $records = Import-Csv $backupPath
+
+        foreach ($rec in $records) {
+            $zoneName = $rec.Zone
+            $name = $rec.Name
+            $type = $rec.Type
+            $data = $rec.Data
+
+            try {
+                # Only restore A records with valid IPs
+                if ($type -eq "A" -and $data -match "^\d{1,3}(\.\d{1,3}){3}$") {
+                    $existing = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $name -ErrorAction SilentlyContinue
+
+                    if (-not $existing) {
+                        Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $name -IPv4Address $data -TimeToLive 01:00:00 -ErrorAction Stop
+                        Write-Host "Restored A record: $name → $data in $zoneName"
+                    } else {
+                        Write-Host "Skipped (already exists): $name in $zoneName"
+                    }
+                } else {
+                    Write-Warning "Skipping invalid or empty IP for $name in $zoneName"
+                }
+            } catch {
+                Write-Warning "Error restoring $name in $zoneName: $($_.Exception.Message)"
+            }
+        }
+    } else {
+        Write-Warning "Backup file not found: $backupPath"
+    }
+
+    Write-Host "`n✔ Fallback complete: Original A records restored, DR records and CNAMEs removed." -ForegroundColor Green
 }
 else {
-    Write-Warning "No backup file found to restore records."
+    Write-Host "❌ DC1 is still unreachable. Skipping fallback mode." -ForegroundColor Red
 }
