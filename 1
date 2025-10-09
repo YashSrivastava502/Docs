@@ -1,1 +1,60 @@
-Write-Warning "Failed for ${name} in ${zone}: $($_.Exception.Message)"
+# DNS-Failover.ps1
+# Author: Yash POC | Purpose: DNS Failover Automation
+
+$dc1 = "NJPVDCTEST01"
+$backupPath = "C:\Scripts\dns_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+
+Write-Host "Checking connectivity to $dc1..."
+if (!(Test-Connection -ComputerName $dc1 -Count 2 -Quiet)) {
+    Write-Host "DC1 is unreachable. Running Failover Mode..." -ForegroundColor Yellow
+
+    # Step 1: Backup all records
+    Write-Host "Taking backup of all DNS records..."
+    $zones = Get-DnsServerZone
+    $allRecords = @()
+    foreach ($zone in $zones) {
+        $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName
+        foreach ($r in $records) {
+            $allRecords += [PSCustomObject]@{
+                Zone  = $zone.ZoneName
+                Name  = $r.HostName
+                Type  = $r.RecordType
+                Data  = $r.RecordData.IPv4Address
+            }
+        }
+    }
+    $allRecords | Export-Csv -Path $backupPath -NoTypeInformation
+    Write-Host "Backup saved to: $backupPath"
+
+    # Step 2: Create CNAMEs and remove A records
+    Write-Host "Creating CNAMES for A records (excluding -dr)..."
+    foreach ($zone in $zones) {
+        $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName | Where-Object { $_.RecordType -eq "A" -and $_.HostName -notlike "*-dr" }
+        foreach ($rec in $records) {
+            $drName = "$($rec.HostName)-dr"
+            $drRec = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -Name $drName -ErrorAction SilentlyContinue
+
+            if ($drRec) {
+                try {
+                    # Remove the original A record first
+                    Remove-DnsServerResourceRecord -ZoneName $zone.ZoneName -Name $rec.HostName -RRType "A" -Force -ErrorAction Stop
+
+                    # Then create the CNAME
+                    Add-DnsServerResourceRecordCName -Name $rec.HostName -HostNameAlias "$drName.$($zone.ZoneName)" -ZoneName $zone.ZoneName -ErrorAction Stop
+
+                    Write-Host "CNAME created: $($rec.HostName) → $drName.$($zone.ZoneName)" -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "Failed for ${rec.HostName} in ${zone.ZoneName}: $($_.Exception.Message)"
+                }
+            } else {
+                Write-Warning "NO DR A record found for ${rec.HostName} in ${zone.ZoneName}. Skipping."
+            }
+        }
+    }
+
+    Write-Host "Failover process completed successfully!" -ForegroundColor Cyan
+}
+else {
+    Write-Host "DC1 is reachable. Failover not required." -ForegroundColor Green
+}
