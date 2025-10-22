@@ -1,1 +1,19 @@
-netdom renamecomputer %COMPUTERNAME% /NewName:NEW-HOSTNAME
+    - name: Download SentinelAgent from Blob Storage
+      get_url:
+        url: "{{ sentinel_blob_url }}?{{ sentinel_sas_token }}"
+        dest: /tmp/SentinelAgent_linux_x86_64_v24_2_2_20.deb
+        mode: '0644'
+
+    - name: Install SentinelAgent
+      apt:
+        deb: /tmp/SentinelAgent_linux_x86_64_v24_2_2_20.deb
+
+    - name: Configure SentinelOne site token
+      shell: echo "{{ sentinel_site_token }}" | /opt/sentinelone/bin/sentinelctl config set sitekey
+      args:
+        executable: /bin/bash
+
+    - name: Start SentinelOne
+      shell: /opt/sentinelone/bin/sentinelctl control start
+      args:
+        executable: /bin/bash
