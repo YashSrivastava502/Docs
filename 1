@@ -1,1 +1,114 @@
-Add-ADGroupMember -Identity "Domain Admins" -Members "yash"
+---
+- name: Configure Linux VM with Software and Settings
+  hosts: linux_vms
+  become: yes
+  become_user: root
+  vars:
+    node_exporter_url: "https://github.com/prometheus/node_exporter/releases/download/v1.9.0/node_exporter-1.9.0.linux-amd64.tar.gz"
+    sentinel_blob_url: "https://yourstorageaccount.blob.core.windows.net/software-container/SentinelAgent_linux_x86_64_v24_2_2_20.deb"
+    sentinel_sas_token: "your_sas_token_here"  # PASTE YOUR SAS TOKEN HERE
+    sentinel_site_token: "your_sentinel_site_token_here"  # PASTE YOUR SENTINEL TOKEN HERE
+    syslog_server: "10.7.35.46:514"  # PASTE YOUR SYSLOG SERVER HERE
+
+  tasks:
+    - name: Update and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Install nfs-common
+      apt:
+        name: nfs-common
+        state: present
+
+    - name: Download node_exporter
+      get_url:
+        url: "{{ node_exporter_url }}"
+        dest: /tmp/node_exporter.tar.gz
+        mode: '0644'
+
+    - name: Extract node_exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Move node_exporter binary
+      copy:
+        src: /tmp/node_exporter-1.9.0.linux-amd64/node_exporter
+        dest: /usr/local/bin/node_exporter
+        mode: '0755'
+        remote_src: yes
+
+    - name: Create node_exporter service file
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/node_exporter
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start node_exporter
+      systemd:
+        name: node_exporter
+        enabled: yes
+        state: started
+
+    - name: Download SentinelAgent from Blob Storage
+      get_url:
+        url: "{{ sentinel_blob_url }}?{{ sentinel_sas_token }}"
+        dest: /tmp/SentinelAgent_linux_x86_64_v24_2_2_20.deb
+        mode: '0644'
+
+    - name: Install SentinelAgent
+      apt:
+        deb: /tmp/SentinelAgent_linux_x86_64_v24_2_2_20.deb
+
+    - name: Configure SentinelOne site token
+      command: /opt/sentinelone/bin/sentinelctl config set sitekey "{{ sentinel_site_token }}"
+
+    - name: Start SentinelOne
+      command: /opt/sentinelone/bin/sentinelctl control start
+
+    - name: Configure Syslog
+      copy:
+        dest: /etc/rsyslog.d/50-default.conf
+        content: "*.* @@{{ syslog_server }}"
+        mode: '0644'
+
+    - name: Restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+
+    - name: Disable firewalld
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Disable UFW
+      command: ufw disable
+      ignore_errors: yes
+
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/node_exporter.tar.gz
+        - /tmp/node_exporter-1.9.0.linux-amd64
+        - /tmp/SentinelAgent_linux_x86_64_v24_2_2_20.deb
