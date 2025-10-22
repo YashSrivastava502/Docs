@@ -1,2 +1,3 @@
 ansible-playbook -i hosts.ini configure_linux_vm.yml \
-  --extra-vars "ansible_user=admin ansible_password=YOUR_ADMIN_PASSWORD ansible_become_pass=YOUR_ADMIN_PASSWORD"
+  --extra-vars "ansible_user=sysadmin ansible_password=drdengdemo@2025# ansible_become_pass=drdengdemo@2025#" \
+  -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'"
