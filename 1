@@ -1,15 +1,1 @@
-ssh sysadmin@10.250.80.14
 
-# Check node_exporter
-systemctl status node_exporter
-curl localhost:9100/metrics | head -5
-
-# Check SentinelOne
-/opt/sentinelone/bin/sentinelctl status
-systemctl status sentinelone
-
-# Check syslog
-cat /etc/rsyslog.d/50-default.conf
-
-# Check firewalls
-ufw status
