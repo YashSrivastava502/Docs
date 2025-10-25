@@ -1,4 +1,3 @@
 catch {
-    Write-Warning "Failed to create CNAME for $sName in $sZone: $($_.Exception.Message)"
+    Write-Warning ("Failed to create CNAME for {0} in {1}: {2}" -f $sName, $sZone, $_.Exception.Message)
 }
-
