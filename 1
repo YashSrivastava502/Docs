@@ -1,1 +1,182 @@
-Set-DnsClientServerAddress
+import requests
+import appinsight_report_config
+import json, time
+from datetime import datetime, timedelta, timezone
+from azure.identity import ClientSecretCredential
+from msal import ConfidentialClientApplication
+import csv
+import re
+import os
+import pandas as pd
+import smtplib
+from io import BytesIO
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
+# Tenant ID, Client ID, and Client Secret
+tenant_id = appinsight_report_config.TENANT_ID
+client_id = appinsight_report_config.CLIENT_ID
+client_secret = appinsight_report_config.CLIENT_SECRET
+user_id = appinsight_report_config.USER_ID
+id = appinsight_report_config.id
+
+# Azure credentials
+credential = ClientSecretCredential(tenant_id, client_id, client_secret)
+
+# Get access token
+access_token = credential.get_token("https://management.azure.com/.default").token
+
+
+def fetch_alerts(subscription_id):
+    end_time_utc = datetime.now(timezone.utc)
+    start_time_utc = end_time_utc - timedelta(minutes=1)
+    start_time_str = start_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time_str = end_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.AlertsManagement/alerts?customTimeRange={start_time_str}/{end_time_str}&api-version=2019-05-05-preview"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        requests.packages.urllib3.disable_warnings()
+        response = requests.get(url, headers=headers, verify=False)
+        if response.status_code == 200:
+            alerts = response.json()
+            filtered_alerts = []
+            for alert in alerts.get("value", []):
+                props = alert.get("properties", {})
+                essentials = props.get("essentials", {})
+                filtered_alerts.append({
+                    "severity": essentials.get("severity"),
+                    "targetResource": essentials.get("targetResource"),
+                    "targetResourceName": essentials.get("targetResourceName"),
+                    "name": alert.get("name")
+                })
+            return filtered_alerts
+        else:
+            print("Failed to fetch alerts:", response.status_code, response.text)
+            return None
+    except Exception as e:
+        print("An error occurred:", e)
+        return None
+
+
+def save_to_json(alerts):
+    if alerts:
+        with open("alerts.json", "w") as f:
+            json.dump(alerts, f)
+        print("Filtered alerts saved to 'alerts.json' file.")
+
+
+def map_severity(severity):
+    if severity in ["Sev0", "Sev1"]:
+        return "Critical"
+    elif severity == "Sev2":
+        return "Warning"
+    elif severity == "Sev3":
+        return "Informational"
+    else:
+        return severity
+
+
+def send_email(api_name, owner_email, severity, alert_description, cc_email, full_url):
+    severity_label = map_severity(severity)
+    smtp_server = appinsight_report_config.SMTP_SERVER
+    smtp_port = appinsight_report_config.SMTP_PORT
+    sender_email = appinsight_report_config.SENDER_EMAIL
+    password = appinsight_report_config.SENDER_PASSWORD
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = owner_email
+    msg["Cc"] = cc_email
+    msg["Subject"] = f"Alert Fired: Severity:{severity_label} | {alert_description}"
+
+    body = f"""
+    <html>
+    <body>
+    <p>Hi Team,</p>
+    <p>We have received the following alert from the subjected API. Kindly review and take necessary action.</p>
+    <p><b>Severity:</b> {severity_label}</p>
+    <p><b>Source:</b> {api_name}</p>
+    <p><b>Alert Description:</b> {alert_description}</p>
+    <p><b>Reference Alert URL:</b><br>
+    <a href="{full_url}" target="_blank">{full_url}</a></p>
+    <p>Thanks & Regards,<br>EMS Team</p>
+    </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(body, "html"))
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(sender_email, password)
+        server.send_message(msg)
+
+
+def process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2):
+    base_url = "https://portal.azure.com/#@fareportal.com"
+    target_resource = alert.get("targetResource")
+    target_resource_name = alert.get("targetResourceName")
+    severity = alert.get("severity")
+    alert_description = alert.get("name")
+    full_url = f"{base_url}/resource{target_resource}"
+
+    print(f"Processing alert: {target_resource_name} ({severity})")
+    print(f"Reference URL: {full_url}")
+
+    # Send email directly without screenshot
+    send_email(target_resource_name, owner_email, severity, alert_description, cc_email, full_url)
+    print(f"Alert email sent for {target_resource_name}")
+
+
+def fetch_data_from_onedrive():
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    app = ConfidentialClientApplication(client_id, authority=authority, client_credential=client_secret)
+    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    access_token = result["access_token"]
+
+    my_files_url = f"https://graph.microsoft.com/v1.0/users/{user_id}/drive/root/children"
+    response = requests.get(my_files_url, headers={"Authorization": "Bearer " + access_token})
+    results = response.json()["value"]
+
+    receipient_file = None
+    for item in results:
+        if item["name"] == "Appinsight_alerts_receipients.xlsx":
+            receipient_file = item
+            break
+
+    if receipient_file:
+        receipient_file_url = receipient_file["@microsoft.graph.downloadUrl"]
+        receipient_file_response = requests.get(receipient_file_url)
+        if receipient_file_response.status_code == 200:
+            receipient_content = BytesIO(receipient_file_response.content)
+            receipient_df_1 = pd.read_excel(receipient_content)
+            global recep_dict, recep_dict2
+            recep_dict = dict(zip(receipient_df_1["API_Name"], receipient_df_1["Recipients (To)"]))
+            recep_dict2 = dict(zip(receipient_df_1["API_Name"], receipient_df_1["Recipients (cc)"]))
+
+
+if __name__ == "__main__":
+    try:
+        subscription_id = appinsight_report_config.SUBSCRIPTION_ID
+        alerts = fetch_alerts(subscription_id)
+        save_to_json(alerts)
+
+        api_names_not_found = []
+        for alert in alerts:
+            fetch_data_from_onedrive()
+            owner_email = recep_dict.get(alert.get("targetResourceName"))
+            cc_email = recep_dict2.get(alert.get("targetResourceName"))
+            if owner_email is None:
+                print(f"No owner email found for API: {alert.get('targetResourceName')}.")
+                api_names_not_found.append(alert.get("targetResourceName"))
+                owner_email = appinsight_report_config.DEFAULT_EMAIL
+            process_alert(alert, recep_dict, owner_email, cc_email, recep_dict2)
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
