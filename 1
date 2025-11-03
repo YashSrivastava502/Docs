@@ -1,54 +1,35 @@
-resource_group_name = "usei-dr-rgp01"
-vm_name             = "app-linux-01"
-
-
-terraform {
-  required_providers {
-    azapi = {
-      source  = "azure/azapi"
-      version = "~> 1.13"
-    }
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.80"
-    }
+resource "null_resource" "stop_vm" {
+  provisioner "local-exec" {
+    command = var.vm_name != "" ? 
+      "echo 'Stopping VM: ${var.vm_name}' && az vm stop -g ${var.resource_group_name} -n ${var.vm_name}" : 
+      "echo 'Stopping all VMs in resource group: ${var.resource_group_name}' && az vm list -g ${var.resource_group_name} --query '[].name' -o tsv | while read vm; do echo Stopping VM: $vm; az vm stop -g ${var.resource_group_name} -n $vm; done"
   }
-}
-
-provider "azurerm" {
-  features {}
-}
-
-provider "azapi" {}
-
-# Get VM details
-data "azurerm_virtual_machine" "vm" {
-  name                = var.vm_name
-  resource_group_name = var.resource_group_name
-}
-
-# Stop VM (Power Off)
-resource "azapi_resource_action" "stop_vm" {
-  type        = "Microsoft.Compute/virtualMachines@2023-09-01"
-  resource_id = data.azurerm_virtual_machine.vm.id
-  action      = "powerOff"
-  method      = "POST"
-
-  # Optional: Set skipShutdown = false to allow graceful shutdown
-  body = jsonencode({
-    skipShutdown = false
-  })
 }
 
 
 variable "resource_group_name" {
+  description = "The name of the resource group."
   type        = string
-  description = "Name of the resource group"
 }
 
 variable "vm_name" {
+  description = "Optional. Name of the specific VM to stop. Leave empty to stop all VMs."
   type        = string
-  description = "Name of the VM to stop"
+  default     = ""
 }
 
+
+
+module "stop_vm_test" {
+  source              = "./stop_vm"
+  resource_group_name = "rg-demo"
+  vm_name             = "test-vm01"
+}
+
+
+module "stop_all_vms" {
+  source              = "./stop_vm"
+  resource_group_name = "rg-demo"
+  vm_name             = ""   # leave empty
+}
 
