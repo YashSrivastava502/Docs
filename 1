@@ -1,1 +1,13 @@
-stop_command = var.vm_name != "" ?
+locals {
+  stop_command = (
+    var.vm_name != "" ?
+    "echo Stopping VM: ${var.vm_name} && az vm stop -g ${var.resource_group_name} -n ${var.vm_name}" :
+    "echo Stopping all VMs in resource group: ${var.resource_group_name} && az vm list -g ${var.resource_group_name} --query \"[].name\" -o tsv | while read vm; do echo Stopping VM: $vm; az vm stop -g ${var.resource_group_name} -n $vm; done"
+  )
+}
+
+resource "null_resource" "stop_vm" {
+  provisioner "local-exec" {
+    command = local.stop_command
+  }
+}
