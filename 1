@@ -1,27 +1,9 @@
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.80"
-    }
-    azapi = {
-      source  = "azure/azapi"
-      version = "~> 1.13"
-    }
-  }
-
-  required_version = ">= 1.6.0"
+variable "resource_group_name" {
+  description = "The name of the resource group containing the VM"
+  type        = string
 }
 
-provider "azurerm" {
-  features {}
-}
-
-provider "azapi" {}
-
-module "stop_vm" {
-  source = "./modules/stop_vm"
-
-  resource_group_name = var.resource_group_name
-  vm_name             = var.vm_name
+variable "vm_name" {
+  description = "The name of the VM to stop"
+  type        = string
 }
