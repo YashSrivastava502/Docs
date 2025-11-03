@@ -1,9 +1,54 @@
+resource_group_name = "usei-dr-rgp01"
+vm_name             = "app-linux-01"
+
+
+terraform {
+  required_providers {
+    azapi = {
+      source  = "azure/azapi"
+      version = "~> 1.13"
+    }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.80"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+provider "azapi" {}
+
+# Get VM details
+data "azurerm_virtual_machine" "vm" {
+  name                = var.vm_name
+  resource_group_name = var.resource_group_name
+}
+
+# Stop VM (Power Off)
+resource "azapi_resource_action" "stop_vm" {
+  type        = "Microsoft.Compute/virtualMachines@2023-09-01"
+  resource_id = data.azurerm_virtual_machine.vm.id
+  action      = "powerOff"
+  method      = "POST"
+
+  # Optional: Set skipShutdown = false to allow graceful shutdown
+  body = jsonencode({
+    skipShutdown = false
+  })
+}
+
+
 variable "resource_group_name" {
-  description = "The name of the resource group containing the VM"
   type        = string
+  description = "Name of the resource group"
 }
 
 variable "vm_name" {
-  description = "The name of the VM to stop"
   type        = string
+  description = "Name of the VM to stop"
 }
+
+
