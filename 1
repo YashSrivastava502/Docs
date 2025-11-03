@@ -1,31 +1,33 @@
+locals {
+  stop_command = var.vm_name != "" ?
+    "echo Stopping VM: ${var.vm_name} && az vm stop -g ${var.resource_group_name} -n ${var.vm_name}" :
+    "echo Stopping all VMs in resource group: ${var.resource_group_name} && az vm list -g ${var.resource_group_name} --query \"[].name\" -o tsv | while read vm; do echo Stopping VM: $vm; az vm stop -g ${var.resource_group_name} -n $vm; done"
+}
+
 resource "null_resource" "stop_vm" {
   provisioner "local-exec" {
-    command = var.vm_name != "" ? 
-      "echo 'Stopping VM: ${var.vm_name}' && az vm stop -g ${var.resource_group_name} -n ${var.vm_name}" : 
-      "echo 'Stopping all VMs in resource group: ${var.resource_group_name}' && az vm list -g ${var.resource_group_name} --query '[].name' -o tsv | while read vm; do echo Stopping VM: $vm; az vm stop -g ${var.resource_group_name} -n $vm; done"
+    command = local.stop_command
   }
 }
 
 
 variable "resource_group_name" {
-  description = "The name of the resource group."
+  description = "The name of the resource group containing the VMs."
   type        = string
 }
 
 variable "vm_name" {
-  description = "Optional. Name of the specific VM to stop. Leave empty to stop all VMs."
+  description = "Optional: Specific VM name to stop. Leave blank to stop all VMs."
   type        = string
   default     = ""
 }
 
 
-
-module "stop_vm_test" {
+module "stop_one_vm" {
   source              = "./stop_vm"
   resource_group_name = "rg-demo"
   vm_name             = "test-vm01"
 }
-
 
 module "stop_all_vms" {
   source              = "./stop_vm"
