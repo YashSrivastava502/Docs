@@ -1,72 +1,24 @@
-curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+trigger:
+- main   # or disable auto trigger if you want manual only
 
-mkdir -p ~/azure-vm-scheduler
-cd ~/azure-vm-scheduler
+pool:
+  name: 'DR-Ansible'   # Your self-hosted agent
 
-nano vm-control.sh
+parameters:
+- name: action
+  displayName: "Select VM Action"
+  type: string
+  default: 'stop'
+  values:
+  - start
+  - stop
 
-#!/bin/bash
-
-# Configuration
-RESOURCE_GROUP="usei-dr-rgp01"
-ACTION="$1"   # start or stop
-LOG_FILE="/var/log/vm-control.log"
-
-# Timestamp
-echo "----------------------------------------" >> $LOG_FILE
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting $ACTION operation" >> $LOG_FILE
-
-# Get all VMs in RG
-VMS=$(az vm list -g $RESOURCE_GROUP --query "[].name" -o tsv)
-
-for VM in $VMS; do
-    if [ "$ACTION" == "start" ]; then
-        echo "Starting VM: $VM" | tee -a $LOG_FILE
-        az vm start -g $RESOURCE_GROUP -n $VM >> $LOG_FILE 2>&1
-    elif [ "$ACTION" == "stop" ]; then
-        echo "Stopping VM: $VM" | tee -a $LOG_FILE
-        az vm deallocate -g $RESOURCE_GROUP -n $VM >> $LOG_FILE 2>&1
-    else
-        echo "Invalid action. Use 'start' or 'stop'." | tee -a $LOG_FILE
-        exit 1
-    fi
-done
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Completed $ACTION operation" >> $LOG_FILE
-echo "----------------------------------------" >> $LOG_FILE
-
-
-chmod +x ~/azure-vm-scheduler/vm-control.sh
-
-
-./vm-control.sh stop
-./vm-control.sh start
-
-
-
-LOG_FILE="$HOME/azure-vm-scheduler/vm-control.log"
-
-
-#!/bin/bash
-# ------------------------------------------
-# Azure VM Start/Stop Automation Script
-# ------------------------------------------
-
-# Configuration
-RESOURCE_GROUP="usei-dr-rgp01"
-ACTION="$1"   # Expected: start or stop
-LOG_FILE="/var/log/vm-control.log"
-EXCLUDE_VM="use1-drd-ansible"   # Control VM to skip
-
-# Create log directory if it doesn't exist
-sudo mkdir -p $(dirname $LOG_FILE)
-sudo touch $LOG_FILE
-sudo chmod 666 $LOG_FILE
-
-# Timestamp
-echo "----------------------------------------" >> $LOG_FILE
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting $ACTION operation" >> $LOG_FILE
-
+steps:
+- script: |
+    echo "Running Azure VM Control Script with action: ${{ parameters.action }}"
+    chmod +x ./vm-control.sh
+    ./vm-control.sh ${{ parameters.action }}
+  displayName: 'Run VM Control Script'
 # Get all VM names in resource group
 VMS=$(az vm list -g $RESOURCE_GROUP --query "[].name" -o tsv)
 
