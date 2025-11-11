@@ -1,3 +1,1 @@
-azcopy copy '/usr/local/lib/python3.9/dist-packages' \
-'https://fpinfbackup.blob.core.windows.net/datascience?<VALID_SAS_TOKEN>' \
---recursive
+azcopy.exe copy "%USERPROFILE%\Downloads\terraform" "https://fpinfbackup.blob.core.windows.net/datascience?<SAS_TOKEN>" --recursive=true
