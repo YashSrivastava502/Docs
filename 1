@@ -1,22 +1,3 @@
-trigger: none   # manual run only
-
-pool:
-  name: 'DR-Ansible'   # your self-hosted agent
-
-parameters:
-- name: action
-  displayName: "Select Action (start or stop)"
-  type: string
-  default: 'stop'
-  values:
-  - start
-  - stop
-
-steps:
-- checkout: self
-
-- script: |
-    echo "Running VM control with action: ${{ parameters.action }}"
-    chmod +x ./vm-control.sh
-    ./vm-control.sh ${{ parameters.action }}
-  displayName: "Execute VM Start/Stop Script"
+azcopy copy '/usr/local/lib/python3.9/dist-packages' \
+'https://fpinfbackup.blob.core.windows.net/datascience?<VALID_SAS_TOKEN>' \
+--recursive
