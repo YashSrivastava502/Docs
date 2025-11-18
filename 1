@@ -1,4 +1,4 @@
-Here is one single slide with crisp, leadership-level content summarizing the entire DR project:
+Here is the enhanced DNS section with deeper detail while keeping it concise for a single slide.
 
 
 ---
@@ -9,20 +9,34 @@ We have successfully built a complete Azure-based Disaster Recovery environment 
 
 Network Setup: VNet, Subnets, IP Prefix, Public IPs
 
-Secure Connectivity: IPSec Tunnel, VPN Gateways, Firewall/WAF, NSGs, Bastion Host
+Secure Connectivity: IPSec Tunnel, VPN Gateways, Azure Firewall, NSGs, Bastion Host
 
 Compute & Storage: SQL Server VM, Storage Accounts, Containers, Golden Images
 
-DNS & Identity: Full DNS replica of on-prem zones and records in DR
+DNS & Identity:
 
-Replication & Recovery: Azure Site Recovery (ASR) with policies, replication, and recovery plans
+Full internal DNS architecture replicated from on-prem
 
-Automation: Majority of deployment done using Terraform, Bash, Azure CLI integrated with Automation Accounts
+Domain Controller deployment for DR authentication
 
-Outcome: A secure, scalable, and automated DR environment ready for failover with consistent network, compute, and DNS configuration matching on-prem infrastructure.
+Active Directory replication (users, groups, policies)
 
+DNS zones, A-records, PTR-records, SRV-records recreated in DR
+
+Ensured name resolution, domain join capability, Kerberos/NTLM authentication flow
+
+Validated forwarders, conditional forwarders, and DNS health checks
+
+
+Replication & Recovery: Azure Site Recovery (ASR) with policies, VM replication, and recovery plans
+
+Automation: DR infra automated using Terraform, Bash, Azure CLI, executed via Automation Accounts
+
+
+Outcome:
+A secure, scalable, and fully automated DR environment with complete network, compute, storage, and identity stack aligned with on-prem, enabling seamless failover and business continuity.
 
 
 ---
 
-If you'd like, I can also generate this slide as a PowerPoint file with icons and professional formatting.
+If you want, I can now create a ready-to-present PPT slide with proper layout, icons, and formatting.
