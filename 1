@@ -1,189 +1,229 @@
-import re
 import sqlite3
-import paramiko
-import csv
-from io import TextIOWrapper
 from datetime import datetime
 
-# ============================
-# CONFIG
-# ============================
+import altair as alt
+import pandas as pd
+import streamlit as st
 
-DB_PATH = "metrics.db"  # local SQLite file
-
-SFTP_HOST = "sftp.yourcompany.com"
-SFTP_PORT = 22
-SFTP_USER = "your_user"
-SFTP_PASSWORD = "your_password"
-
-REMOTE_DIR = "/path/on/sftp/where/csvs/are"  # e.g. "/metrics/csv"
+DB_PATH = "metrics.db"  # path to your SQLite DB file
 
 
-# ============================
-# DB SETUP
-# ============================
+# ======================
+# DB & DATA HELPERS
+# ======================
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS server_daily_metrics (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            metric_date     TEXT NOT NULL,
-            instance        TEXT NOT NULL,
-            os_type         TEXT NOT NULL,
-            max_cpu         REAL,
-            avg_cpu         REAL,
-            max_mem         REAL,
-            avg_mem         REAL,
-            disk_util       REAL,
-            ingested_at     TEXT DEFAULT (datetime('now')),
-            UNIQUE (metric_date, instance, os_type)
-        );
-        """
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect(DB_PATH)
+
+
+@st.cache_data
+def get_os_types():
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT DISTINCT os_type FROM server_daily_metrics ORDER BY os_type;",
+        conn,
     )
-    conn.commit()
-    return conn
+    return df["os_type"].tolist()
 
 
-# ============================
-# SFTP CONNECT
-# ============================
+@st.cache_data
+def get_dates():
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT DISTINCT metric_date FROM server_daily_metrics ORDER BY metric_date DESC;",
+        conn,
+    )
+    return df["metric_date"].tolist()
 
-def get_sftp_client():
-    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
-    transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
-    sftp = paramiko.SFTPClient.from_transport(transport)
-    return sftp, transport
 
-
-# ============================
-# HELPERS
-# ============================
-
-def extract_date_from_filename(filename: str) -> str:
+@st.cache_data
+def load_data(os_type: str, metric_date: str):
+    conn = get_connection()
+    query = """
+        SELECT
+            metric_date,
+            instance,
+            os_type,
+            max_cpu,
+            avg_cpu,
+            max_mem,
+            avg_mem,
+            disk_util
+        FROM server_daily_metrics
+        WHERE os_type = ?
+          AND metric_date = ?
+        ORDER BY instance;
     """
-    Extract 'YYYY-MM-DD' from filename.
-    Example: Last_24_hr_Windows_Performance_metrics_2025-11-25_00-31-33.csv
-    """
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
-    if not m:
-        raise ValueError(f"Could not find date in filename: {filename}")
-    return m.group(1)  # 'YYYY-MM-DD'
+    df = pd.read_sql_query(query, conn, params=(os_type, metric_date))
+
+    # Ensure numeric types
+    for col in ["max_cpu", "avg_cpu", "max_mem", "avg_mem", "disk_util"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
 
 
-def get_os_type_from_filename(filename: str) -> str:
-    if "Windows" in filename:
-        return "windows"
-    elif "Linux" in filename:
-        return "linux"
-    else:
-        raise ValueError(f"Could not detect OS type from filename: {filename}")
-
-
-# ============================
-# MAIN PROCESSING
-# ============================
-
-def process_file(conn, sftp, remote_path):
-    filename = remote_path.split("/")[-1]
-    print(f"Processing: {filename}")
-
-    metric_date = extract_date_from_filename(filename)
-    os_type = get_os_type_from_filename(filename)
-
-    # Column names differ slightly for Windows vs Linux
-    if os_type == "windows":
-        disk_col = "C_Drive"
-        max_mem_col = "Max Memory"
-        avg_mem_col = "Avg Memory"
-    else:  # linux
-        disk_col = "(/)Util"
-        max_mem_col = "Max_Memory"
-        avg_mem_col = "Avg_Memory"
-
-    with sftp.open(remote_path, "r") as remote_file:
-        # Wrap in TextIOWrapper so csv can read text
-        wrapper = TextIOWrapper(remote_file, encoding="utf-8")
-        reader = csv.DictReader(wrapper)
-
-        cur = conn.cursor()
-        row_count = 0
-
-        for row in reader:
-            # Skip empty rows
-            if not row.get("Instance"):
-                continue
-
-            instance = row["Instance"].strip()
-
-            def parse_float(value):
-                try:
-                    return float(str(value).strip())
-                except (ValueError, TypeError):
-                    return None
-
-            max_cpu = parse_float(row.get("Max_CPU"))
-            avg_cpu = parse_float(row.get("Avg_CPU"))
-            max_mem = parse_float(row.get(max_mem_col))
-            avg_mem = parse_float(row.get(avg_mem_col))
-            disk_util = parse_float(row.get(disk_col))
-
-            # UPSERT into SQLite
-            cur.execute(
-                """
-                INSERT INTO server_daily_metrics (
-                    metric_date, instance, os_type,
-                    max_cpu, avg_cpu, max_mem, avg_mem, disk_util
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(metric_date, instance, os_type)
-                DO UPDATE SET
-                    max_cpu = excluded.max_cpu,
-                    avg_cpu = excluded.avg_cpu,
-                    max_mem = excluded.max_mem,
-                    avg_mem = excluded.avg_mem,
-                    disk_util = excluded.disk_util;
-                """,
-                (
-                    metric_date,
-                    instance,
-                    os_type,
-                    max_cpu,
-                    avg_cpu,
-                    max_mem,
-                    avg_mem,
-                    disk_util,
-                ),
-            )
-            row_count += 1
-
-        conn.commit()
-        print(f"  -> Inserted/updated {row_count} rows")
-
+# ======================
+# STREAMLIT APP
+# ======================
 
 def main():
-    conn = init_db()
-    sftp, transport = get_sftp_client()
+    st.set_page_config(
+        page_title="Server Performance Dashboard",
+        layout="wide",
+    )
 
-    try:
-        # List all files once
-        for entry in sftp.listdir_attr(REMOTE_DIR):
-            name = entry.filename
-            # Only process the files we care about
-            if not name.endswith(".csv"):
-                continue
-            if "Last_24_hr_Windows_Performance_metrics" not in name and \
-               "Last_24_hr_Linux_Performance_metrics" not in name:
-                continue
+    st.title("📊 Server Performance Dashboard")
+    st.caption("Data source: metrics.db (SQLite) loaded from daily CSVs (Windows & Linux)")
 
-            remote_path = f"{REMOTE_DIR}/{name}"
-            process_file(conn, sftp, remote_path)
+    # ------------------
+    # Sidebar Filters
+    # ------------------
+    st.sidebar.header("Filters")
 
-    finally:
-        sftp.close()
-        transport.close()
-        conn.close()
+    os_types = get_os_types()
+    if not os_types:
+        st.error("❌ No OS types found in database. Check metrics.db / ETL.")
+        return
+
+    selected_os = st.sidebar.selectbox("OS Type", os_types, index=0, help="Choose Windows or Linux data")
+
+    dates = get_dates()
+    if not dates:
+        st.error("❌ No dates found in database.")
+        return
+
+    selected_date = st.sidebar.selectbox("Metric Date", dates, index=0, help="Data is shown only for this date")
+
+    instance_filter = st.sidebar.text_input(
+        "Filter by instance (optional)",
+        value="",
+        help="Type part of server name or IP to filter the table & charts",
+    )
+
+    # Load data
+    df = load_data(selected_os, selected_date)
+
+    if df.empty:
+        st.warning(f"No rows found for OS = {selected_os}, Date = {selected_date}")
+        return
+
+    if instance_filter.strip():
+        df = df[df["instance"].str.contains(instance_filter.strip(), case=False, na=False)]
+
+    if df.empty:
+        st.warning("No rows match the instance filter.")
+        return
+
+    st.markdown(
+        f"### 🔎 View for **OS = `{selected_os}`**, **Date = `{selected_date}`**  "
+    )
+
+    # ------------------
+    # KPI Cards
+    # ------------------
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric(
+            "Avg Max CPU (%)",
+            f"{df['max_cpu'].mean():.2f}" if not df['max_cpu'].isna().all() else "N/A",
+        )
+    with col2:
+        st.metric(
+            "Avg Max Memory (%)",
+            f"{df['max_mem'].mean():.2f}" if not df['max_mem'].isna().all() else "N/A",
+        )
+    with col3:
+        st.metric(
+            "Avg Disk Util (%)",
+            f"{df['disk_util'].mean():.2f}" if 'disk_util' in df.columns and not df['disk_util'].isna().all() else "N/A",
+        )
+    with col4:
+        st.metric("Total Instances", len(df))
+
+    st.markdown("---")
+
+    # ------------------
+    # Charts
+    # ------------------
+    st.subheader("📈 Top Resource Usage (Selected Date)")
+
+    left, right = st.columns(2)
+
+    # Top 10 by Max CPU
+    with left:
+        st.markdown("**Top 10 Instances by Max CPU (%)**")
+        top_cpu = df.sort_values("max_cpu", ascending=False).head(10).copy()
+        if not top_cpu.empty and not top_cpu["max_cpu"].isna().all():
+            cpu_chart = (
+                alt.Chart(top_cpu)
+                .mark_bar()
+                .encode(
+                    x=alt.X("max_cpu:Q", title="Max CPU (%)"),
+                    y=alt.Y("instance:N", sort="-x", title="Instance"),
+                    tooltip=["instance", "max_cpu", "avg_cpu"],
+                )
+                .properties(height=350)
+            )
+            st.altair_chart(cpu_chart, use_container_width=True)
+        else:
+            st.info("No CPU data available for chart.")
+
+    # Top 10 by Max Memory
+    with right:
+        st.markdown("**Top 10 Instances by Max Memory (%)**")
+        top_mem = df.sort_values("max_mem", ascending=False).head(10).copy()
+        if not top_mem.empty and not top_mem["max_mem"].isna().all():
+            mem_chart = (
+                alt.Chart(top_mem)
+                .mark_bar()
+                .encode(
+                    x=alt.X("max_mem:Q", title="Max Memory (%)"),
+                    y=alt.Y("instance:N", sort="-x", title="Instance"),
+                    tooltip=["instance", "max_mem", "avg_mem"],
+                )
+                .properties(height=350)
+            )
+            st.altair_chart(mem_chart, use_container_width=True)
+        else:
+            st.info("No Memory data available for chart.")
+
+    st.markdown("---")
+
+    # ------------------
+    # Detailed Table
+    # ------------------
+    st.subheader("📋 Detailed Metrics Table")
+
+    display_df = df.rename(
+        columns={
+            "instance": "Instance",
+            "os_type": "OS",
+            "max_cpu": "Max CPU (%)",
+            "avg_cpu": "Avg CPU (%)",
+            "max_mem": "Max Memory (%)",
+            "avg_mem": "Avg Memory (%)",
+            "disk_util": "Disk Util (%)",
+        }
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=450,
+    )
+
+    # Optional: Allow export
+    csv_export = display_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download this table as CSV",
+        data=csv_export,
+        file_name=f"metrics_{selected_os}_{selected_date}.csv",
+        mime="text/csv",
+    )
 
 
 if __name__ == "__main__":
