@@ -8,39 +8,37 @@ import streamlit as st
 DB_PATH = "metrics.db"  # path to your SQLite DB file
 
 
-# ======================
-# DB & DATA HELPERS
-# ======================
+# =============== DB HELPERS ===============
 
-@st.cache_resource
-def get_connection():
-    return sqlite3.connect(DB_PATH)
+def query_db(sql: str, params=()):
+    """Run a query and return a pandas DataFrame."""
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    return df
 
 
-@st.cache_data
 def get_os_types():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT DISTINCT os_type FROM server_daily_metrics ORDER BY os_type;",
-        conn,
+    df = query_db(
+        "SELECT DISTINCT os_type FROM server_daily_metrics ORDER BY os_type;"
     )
     return df["os_type"].tolist()
 
 
-@st.cache_data
 def get_dates():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT DISTINCT metric_date FROM server_daily_metrics ORDER BY metric_date DESC;",
-        conn,
+    # Use substr(metric_date,1,10) in case metric_date has time as well
+    df = query_db(
+        """
+        SELECT DISTINCT substr(metric_date, 1, 10) AS metric_date
+        FROM server_daily_metrics
+        ORDER BY metric_date DESC;
+        """
     )
     return df["metric_date"].tolist()
 
 
-@st.cache_data
 def load_data(os_type: str, metric_date: str):
-    conn = get_connection()
-    query = """
+    # Compare only date part (first 10 chars) for safety
+    sql = """
         SELECT
             metric_date,
             instance,
@@ -52,10 +50,10 @@ def load_data(os_type: str, metric_date: str):
             disk_util
         FROM server_daily_metrics
         WHERE os_type = ?
-          AND metric_date = ?
+          AND substr(metric_date, 1, 10) = ?
         ORDER BY instance;
     """
-    df = pd.read_sql_query(query, conn, params=(os_type, metric_date))
+    df = query_db(sql, (os_type, metric_date))
 
     # Ensure numeric types
     for col in ["max_cpu", "avg_cpu", "max_mem", "avg_mem", "disk_util"]:
@@ -65,9 +63,7 @@ def load_data(os_type: str, metric_date: str):
     return df
 
 
-# ======================
-# STREAMLIT APP
-# ======================
+# =============== STREAMLIT APP ===============
 
 def main():
     st.set_page_config(
@@ -76,11 +72,9 @@ def main():
     )
 
     st.title("📊 Server Performance Dashboard")
-    st.caption("Data source: metrics.db (SQLite) loaded from daily CSVs (Windows & Linux)")
+    st.caption("Data from metrics.db (Windows & Linux daily performance metrics)")
 
-    # ------------------
-    # Sidebar Filters
-    # ------------------
+    # ---------- Sidebar Filters ----------
     st.sidebar.header("Filters")
 
     os_types = get_os_types()
@@ -88,67 +82,93 @@ def main():
         st.error("❌ No OS types found in database. Check metrics.db / ETL.")
         return
 
-    selected_os = st.sidebar.selectbox("OS Type", os_types, index=0, help="Choose Windows or Linux data")
+    selected_os = st.sidebar.selectbox("OS Type", os_types, index=0)
 
     dates = get_dates()
     if not dates:
         st.error("❌ No dates found in database.")
         return
 
-    selected_date = st.sidebar.selectbox("Metric Date", dates, index=0, help="Data is shown only for this date")
+    selected_date = st.sidebar.selectbox("Metric Date", dates, index=0)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Table Filters")
 
     instance_filter = st.sidebar.text_input(
-        "Filter by instance (optional)",
+        "Instance contains (optional)",
         value="",
-        help="Type part of server name or IP to filter the table & charts",
+        help="Filter rows where instance name or IP contains this text",
     )
 
-    # Load data
+    # Sliders for ranges (optional)
+    st.sidebar.markdown("**CPU / Memory / Disk ranges**")
+
+    cpu_min, cpu_max = st.sidebar.slider(
+        "Max CPU (%) range", 0.0, 100.0, (0.0, 100.0), step=1.0
+    )
+    mem_min, mem_max = st.sidebar.slider(
+        "Max Memory (%) range", 0.0, 100.0, (0.0, 100.0), step=1.0
+    )
+    disk_min, disk_max = st.sidebar.slider(
+        "Disk Util (%) range", 0.0, 100.0, (0.0, 100.0), step=1.0
+    )
+
+    # ---------- Load data ----------
     df = load_data(selected_os, selected_date)
 
     if df.empty:
-        st.warning(f"No rows found for OS = {selected_os}, Date = {selected_date}")
+        st.warning(f"⚠ No rows found for OS = {selected_os}, Date = {selected_date}")
         return
 
+    # Apply table filters
     if instance_filter.strip():
         df = df[df["instance"].str.contains(instance_filter.strip(), case=False, na=False)]
 
+    # Range filters (only if column not all NaN)
+    if not df["max_cpu"].isna().all():
+        df = df[(df["max_cpu"] >= cpu_min) & (df["max_cpu"] <= cpu_max)]
+
+    if not df["max_mem"].isna().all():
+        df = df[(df["max_mem"] >= mem_min) & (df["max_mem"] <= mem_max)]
+
+    if "disk_util" in df.columns and not df["disk_util"].isna().all():
+        df = df[(df["disk_util"] >= disk_min) & (df["disk_util"] <= disk_max)]
+
     if df.empty:
-        st.warning("No rows match the instance filter.")
+        st.warning("⚠ No rows left after applying filters. Try relaxing the filters.")
         return
 
     st.markdown(
-        f"### 🔎 View for **OS = `{selected_os}`**, **Date = `{selected_date}`**  "
+        f"### 🔎 View for **OS = `{selected_os}`**, **Date = `{selected_date}`**"
     )
 
-    # ------------------
-    # KPI Cards
-    # ------------------
+    # ---------- KPI Cards ----------
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric(
             "Avg Max CPU (%)",
-            f"{df['max_cpu'].mean():.2f}" if not df['max_cpu'].isna().all() else "N/A",
+            f"{df['max_cpu'].mean():.2f}" if not df["max_cpu"].isna().all() else "N/A",
         )
     with col2:
         st.metric(
             "Avg Max Memory (%)",
-            f"{df['max_mem'].mean():.2f}" if not df['max_mem'].isna().all() else "N/A",
+            f"{df['max_mem'].mean():.2f}" if not df["max_mem"].isna().all() else "N/A",
         )
     with col3:
-        st.metric(
-            "Avg Disk Util (%)",
-            f"{df['disk_util'].mean():.2f}" if 'disk_util' in df.columns and not df['disk_util'].isna().all() else "N/A",
-        )
+        if "disk_util" in df.columns and not df["disk_util"].isna().all():
+            st.metric(
+                "Avg Disk Util (%)",
+                f"{df['disk_util'].mean():.2f}",
+            )
+        else:
+            st.metric("Avg Disk Util (%)", "N/A")
     with col4:
         st.metric("Total Instances", len(df))
 
     st.markdown("---")
 
-    # ------------------
-    # Charts
-    # ------------------
+    # ---------- Charts ----------
     st.subheader("📈 Top Resource Usage (Selected Date)")
 
     left, right = st.columns(2)
@@ -193,13 +213,12 @@ def main():
 
     st.markdown("---")
 
-    # ------------------
-    # Detailed Table
-    # ------------------
-    st.subheader("📋 Detailed Metrics Table")
+    # ---------- Detailed Table ----------
+    st.subheader("📋 Detailed Metrics Table (Filtered)")
 
     display_df = df.rename(
         columns={
+            "metric_date": "Metric Date",
             "instance": "Instance",
             "os_type": "OS",
             "max_cpu": "Max CPU (%)",
@@ -216,7 +235,7 @@ def main():
         height=450,
     )
 
-    # Optional: Allow export
+    # Download filtered table
     csv_export = display_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇️ Download this table as CSV",
