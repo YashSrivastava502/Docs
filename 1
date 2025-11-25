@@ -1,42 +1,190 @@
-Here is the enhanced DNS section with deeper detail while keeping it concise for a single slide.
+import re
+import sqlite3
+import paramiko
+import csv
+from io import TextIOWrapper
+from datetime import datetime
+
+# ============================
+# CONFIG
+# ============================
+
+DB_PATH = "metrics.db"  # local SQLite file
+
+SFTP_HOST = "sftp.yourcompany.com"
+SFTP_PORT = 22
+SFTP_USER = "your_user"
+SFTP_PASSWORD = "your_password"
+
+REMOTE_DIR = "/path/on/sftp/where/csvs/are"  # e.g. "/metrics/csv"
 
 
----
+# ============================
+# DB SETUP
+# ============================
 
-Slide — DR Environment Implementation Summary
-
-We have successfully built a complete Azure-based Disaster Recovery environment with the following components:
-
-Network Setup: VNet, Subnets, IP Prefix, Public IPs
-
-Secure Connectivity: IPSec Tunnel, VPN Gateways, Azure Firewall, NSGs, Bastion Host
-
-Compute & Storage: SQL Server VM, Storage Accounts, Containers, Golden Images
-
-DNS & Identity:
-
-Full internal DNS architecture replicated from on-prem
-
-Domain Controller deployment for DR authentication
-
-Active Directory replication (users, groups, policies)
-
-DNS zones, A-records, PTR-records, SRV-records recreated in DR
-
-Ensured name resolution, domain join capability, Kerberos/NTLM authentication flow
-
-Validated forwarders, conditional forwarders, and DNS health checks
-
-
-Replication & Recovery: Azure Site Recovery (ASR) with policies, VM replication, and recovery plans
-
-Automation: DR infra automated using Terraform, Bash, Azure CLI, executed via Automation Accounts
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS server_daily_metrics (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_date     TEXT NOT NULL,
+            instance        TEXT NOT NULL,
+            os_type         TEXT NOT NULL,
+            max_cpu         REAL,
+            avg_cpu         REAL,
+            max_mem         REAL,
+            avg_mem         REAL,
+            disk_util       REAL,
+            ingested_at     TEXT DEFAULT (datetime('now')),
+            UNIQUE (metric_date, instance, os_type)
+        );
+        """
+    )
+    conn.commit()
+    return conn
 
 
-Outcome:
-A secure, scalable, and fully automated DR environment with complete network, compute, storage, and identity stack aligned with on-prem, enabling seamless failover and business continuity.
+# ============================
+# SFTP CONNECT
+# ============================
+
+def get_sftp_client():
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
+    sftp = paramiko.SFTPClient.from_transport(transport)
+    return sftp, transport
 
 
----
+# ============================
+# HELPERS
+# ============================
 
-If you want, I can now create a ready-to-present PPT slide with proper layout, icons, and formatting.
+def extract_date_from_filename(filename: str) -> str:
+    """
+    Extract 'YYYY-MM-DD' from filename.
+    Example: Last_24_hr_Windows_Performance_metrics_2025-11-25_00-31-33.csv
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if not m:
+        raise ValueError(f"Could not find date in filename: {filename}")
+    return m.group(1)  # 'YYYY-MM-DD'
+
+
+def get_os_type_from_filename(filename: str) -> str:
+    if "Windows" in filename:
+        return "windows"
+    elif "Linux" in filename:
+        return "linux"
+    else:
+        raise ValueError(f"Could not detect OS type from filename: {filename}")
+
+
+# ============================
+# MAIN PROCESSING
+# ============================
+
+def process_file(conn, sftp, remote_path):
+    filename = remote_path.split("/")[-1]
+    print(f"Processing: {filename}")
+
+    metric_date = extract_date_from_filename(filename)
+    os_type = get_os_type_from_filename(filename)
+
+    # Column names differ slightly for Windows vs Linux
+    if os_type == "windows":
+        disk_col = "C_Drive"
+        max_mem_col = "Max Memory"
+        avg_mem_col = "Avg Memory"
+    else:  # linux
+        disk_col = "(/)Util"
+        max_mem_col = "Max_Memory"
+        avg_mem_col = "Avg_Memory"
+
+    with sftp.open(remote_path, "r") as remote_file:
+        # Wrap in TextIOWrapper so csv can read text
+        wrapper = TextIOWrapper(remote_file, encoding="utf-8")
+        reader = csv.DictReader(wrapper)
+
+        cur = conn.cursor()
+        row_count = 0
+
+        for row in reader:
+            # Skip empty rows
+            if not row.get("Instance"):
+                continue
+
+            instance = row["Instance"].strip()
+
+            def parse_float(value):
+                try:
+                    return float(str(value).strip())
+                except (ValueError, TypeError):
+                    return None
+
+            max_cpu = parse_float(row.get("Max_CPU"))
+            avg_cpu = parse_float(row.get("Avg_CPU"))
+            max_mem = parse_float(row.get(max_mem_col))
+            avg_mem = parse_float(row.get(avg_mem_col))
+            disk_util = parse_float(row.get(disk_col))
+
+            # UPSERT into SQLite
+            cur.execute(
+                """
+                INSERT INTO server_daily_metrics (
+                    metric_date, instance, os_type,
+                    max_cpu, avg_cpu, max_mem, avg_mem, disk_util
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(metric_date, instance, os_type)
+                DO UPDATE SET
+                    max_cpu = excluded.max_cpu,
+                    avg_cpu = excluded.avg_cpu,
+                    max_mem = excluded.max_mem,
+                    avg_mem = excluded.avg_mem,
+                    disk_util = excluded.disk_util;
+                """,
+                (
+                    metric_date,
+                    instance,
+                    os_type,
+                    max_cpu,
+                    avg_cpu,
+                    max_mem,
+                    avg_mem,
+                    disk_util,
+                ),
+            )
+            row_count += 1
+
+        conn.commit()
+        print(f"  -> Inserted/updated {row_count} rows")
+
+
+def main():
+    conn = init_db()
+    sftp, transport = get_sftp_client()
+
+    try:
+        # List all files once
+        for entry in sftp.listdir_attr(REMOTE_DIR):
+            name = entry.filename
+            # Only process the files we care about
+            if not name.endswith(".csv"):
+                continue
+            if "Last_24_hr_Windows_Performance_metrics" not in name and \
+               "Last_24_hr_Linux_Performance_metrics" not in name:
+                continue
+
+            remote_path = f"{REMOTE_DIR}/{name}"
+            process_file(conn, sftp, remote_path)
+
+    finally:
+        sftp.close()
+        transport.close()
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
