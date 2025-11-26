@@ -1,1 +1,49 @@
-reg add HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider /v Enabled /t REG_DWORD /d 0 /f
+ntdsutil
+roles
+connections
+connect to server <Azure-DC-Name>
+quit
+seize pdc
+seize rid master
+seize schema master
+seize naming master
+seize infrastructure master
+quit
+quit
+
+
+w32tm /config /manualpeerlist:"time.windows.com" /syncfromflags:manual /reliable:yes /update
+net stop w32time
+net start w32time
+w32tm /resync
+
+
+ntdsutil
+metadata cleanup
+connections
+connect to server <Azure-DC-Name>
+quit
+select operation target
+list domains
+select domain <ID>
+list sites
+select site <ID>
+list servers in site
+select server <ID-of-On-Prem-DC>
+quit
+remove selected server
+quit
+quit
+
+
+
+w32tm /query/status
+dcdiag /v
+netdom query fsmo
+
+
+
+
+
+
+
