@@ -1,48 +1,46 @@
-Azure Production Cost Estimation – Interview Ready
+Azure VM Cost Estimation – Interview Ready
 Scenario:
-Azure Production environment in East US region with three virtual machines.
+Azure Production environment in East US region for a single virtual machine.
 
 
-Infrastructure Requirement
-- Number of VMs: 3
-- Per VM Configuration:
-  • CPU: 32 vCPUs
-  • RAM: 128 GB
-  • Disk: 1 TB Premium SSD (/data)
-- OS: Linux
+VM Configuration
+- CPU: 4 vCPUs
+- RAM: 64 GB
+- OS Disk: 500 GB Standard SSD
+- Data Disk: 150 GB Standard SSD
+- Operating System: Linux
 
 
 Recommended Azure VM Size
-Standard_D32s_v5
-- 32 vCPUs
-- 128 GB RAM
-- Best suited for balanced compute and memory workloads in production
+Standard_E4s_v5
+- 4 vCPUs
+- 64 GB RAM
+- Suitable for memory-intensive workloads
 
 
 Cost Breakdown (East US)
 Pricing Model
-Monthly Cost (3 VMs)
+Monthly Cost
 Yearly Cost
-Savings vs Pay-As-You-Go
+Savings
 Pay-As-You-Go
-$5,205
-$62,460
+$391
+$4,692
 -
 1-Year Reserved
-$3,285
-$39,420
+$246
+$2,952
 ~37%
 3-Year Reserved
-$2,205
-$26,460
-~58%
+$161
+$1,932
+~59%
 
-Interview Explanation (How to Answer)
-In production, I prefer Reserved Instances for predictable workloads. For this setup, a 3-year Reserved Instance gives the best cost optimization, reducing costs by nearly 60% compared to Pay-As-You-Go while maintaining full performance. Premium SSDs are used to ensure consistent IOPS and low latency for production workloads.
-FinOps & Architecture Best Practices
-- Use 3-Year Reserved Instances for stable PROD workloads
-- Enable Availability Zones for high availability (no extra VM cost)
-- Monitor Log Analytics ingestion to avoid unexpected costs
-- Right-size VMs periodically using Azure Advisor
+Interview Explanation
+For this workload, the E-series VM is chosen due to its high memory-to-core ratio. Using a 3-year Reserved Instance significantly reduces cost for production workloads while providing the same performance and SLA as Pay-As-You-Go.
+Best Practices
+- Use Reserved Instances for predictable workloads
+- Monitor disk utilization to avoid over-provisioning
+- Review Azure Advisor recommendations periodically
 
 
