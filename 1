@@ -1,162 +1,113 @@
 import sqlite3
-import paramiko
-import csv
-import re
-from io import TextIOWrapper
-
-# ================= CONFIG =================
+import pandas as pd
+from dash import Dash, dcc, html, dash_table, Input, Output
+import plotly.express as px
 
 DB_PATH = "metrics.db"
 
-SFTP_HOST = "sftp.yourcompany.com"
-SFTP_PORT = 22
-SFTP_USER = "username"
-SFTP_PASSWORD = "password"
+def query(sql, params=()):
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(sql, conn, params=params)
 
-REMOTE_DIR = "/path/to/csv/files"
+def os_list():
+    return query("SELECT DISTINCT os_type FROM server_daily_metrics")["os_type"].tolist()
 
-# =========================================
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS server_daily_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        metric_date TEXT NOT NULL,
-        instance TEXT NOT NULL,
-        os_type TEXT NOT NULL,
-        max_cpu REAL,
-        avg_cpu REAL,
-        max_mem REAL,
-        avg_mem REAL,
-        disk_util REAL,
-        ingested_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(metric_date, instance, os_type)
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS ingestion_log (
-        filename TEXT PRIMARY KEY,
-        processed_at TEXT DEFAULT (datetime('now'))
-    );
-    """)
-
-    conn.commit()
-    return conn
+def date_list():
+    return query("""
+        SELECT DISTINCT substr(metric_date,1,10) AS metric_date
+        FROM server_daily_metrics
+        ORDER BY metric_date DESC
+    """)["metric_date"].tolist()
 
 
-def extract_date(filename):
-    match = re.search(r"\d{4}-\d{2}-\d{2}", filename)
-    if not match:
-        raise ValueError(f"Date not found in filename: {filename}")
-    return match.group(0)
+app = Dash(__name__)
+app.title = "Server Performance Dashboard"
 
+app.layout = html.Div([
 
-def detect_os(filename):
-    if "Windows" in filename:
-        return "windows"
-    elif "Linux" in filename:
-        return "linux"
-    else:
-        raise ValueError(f"Unknown OS in filename: {filename}")
+    html.H2("Server Performance Dashboard"),
 
+    html.Div([
+        html.Label("OS"),
+        dcc.Dropdown(
+            id="os",
+            options=[{"label": x.upper(), "value": x} for x in os_list()],
+            value=os_list()[0]
+        ),
 
-def connect_sftp():
-    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
-    transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
-    return paramiko.SFTPClient.from_transport(transport), transport
+        html.Label("Date"),
+        dcc.Dropdown(
+            id="date",
+            options=[{"label": x, "value": x} for x in date_list()],
+            value=date_list()[0]
+        ),
 
+        html.Label("Instance contains"),
+        dcc.Input(id="instance", type="text")
 
-def process_file(conn, sftp, filename):
-    print(f"Processing {filename}")
+    ], style={"width": "25%", "display": "inline-block"}),
 
-    metric_date = extract_date(filename)
-    os_type = detect_os(filename)
+    html.Div([
 
-    if os_type == "windows":
-        disk_col = "C_Drive"
-        max_mem_col = "Max Memory"
-        avg_mem_col = "Avg Memory"
-    else:
-        disk_col = "(/)Util"
-        max_mem_col = "Max_Memory"
-        avg_mem_col = "Avg_Memory"
+        html.Div(id="kpis"),
 
-    with sftp.open(f"{REMOTE_DIR}/{filename}", "r") as f:
-        reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8"))
-        cur = conn.cursor()
+        dcc.Graph(id="cpu_chart"),
 
-        for row in reader:
-            if not row.get("Instance"):
-                continue
-
-            def to_float(x):
-                try:
-                    return float(str(x).strip())
-                except:
-                    return None
-
-            cur.execute("""
-            INSERT INTO server_daily_metrics (
-                metric_date, instance, os_type,
-                max_cpu, avg_cpu, max_mem, avg_mem, disk_util
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(metric_date, instance, os_type)
-            DO UPDATE SET
-                max_cpu=excluded.max_cpu,
-                avg_cpu=excluded.avg_cpu,
-                max_mem=excluded.max_mem,
-                avg_mem=excluded.avg_mem,
-                disk_util=excluded.disk_util;
-            """, (
-                metric_date,
-                row["Instance"].strip(),
-                os_type,
-                to_float(row.get("Max_CPU")),
-                to_float(row.get("Avg_CPU")),
-                to_float(row.get(max_mem_col)),
-                to_float(row.get(avg_mem_col)),
-                to_float(row.get(disk_col))
-            ))
-
-        cur.execute(
-            "INSERT OR REPLACE INTO ingestion_log(filename) VALUES (?)",
-            (filename,)
+        dash_table.DataTable(
+            id="table",
+            filter_action="native",
+            sort_action="native",
+            page_size=15,
+            style_table={"overflowX": "auto"}
         )
 
-        conn.commit()
-        print(f"✔ Loaded {filename}")
+    ], style={"width": "73%", "display": "inline-block", "paddingLeft": "20px"})
+])
 
 
-def main():
-    conn = init_db()
-    sftp, transport = connect_sftp()
+@app.callback(
+    Output("table", "data"),
+    Output("table", "columns"),
+    Output("cpu_chart", "figure"),
+    Output("kpis", "children"),
+    Input("os", "value"),
+    Input("date", "value"),
+    Input("instance", "value")
+)
+def update(os_type, date, instance):
 
-    try:
-        cur = conn.cursor()
-        for f in sftp.listdir(REMOTE_DIR):
+    df = query("""
+        SELECT instance, max_cpu, avg_cpu, max_mem, avg_mem, disk_util
+        FROM server_daily_metrics
+        WHERE os_type=?
+          AND substr(metric_date,1,10)=?
+    """, (os_type, date))
 
-            if not f.endswith(".csv"):
-                continue
-            if "Last_24_hr" not in f:
-                continue
+    if instance:
+        df = df[df["instance"].str.contains(instance, case=False)]
 
-            cur.execute("SELECT 1 FROM ingestion_log WHERE filename=?", (f,))
-            if cur.fetchone():
-                print(f"Skipping already processed: {f}")
-                continue
+    fig = px.bar(
+        df.sort_values("max_cpu", ascending=False).head(10),
+        x="max_cpu",
+        y="instance",
+        orientation="h",
+        title="Top 10 by Max CPU"
+    )
 
-            process_file(conn, sftp, f)
+    kpis = html.Div([
+        html.B(f"Servers: {len(df)} | "),
+        html.B(f"Avg CPU: {df['max_cpu'].mean():.2f}% | "),
+        html.B(f"Avg Mem: {df['max_mem'].mean():.2f}% | "),
+        html.B(f"Avg Disk: {df['disk_util'].mean():.2f}%")
+    ])
 
-    finally:
-        sftp.close()
-        transport.close()
-        conn.close()
+    return (
+        df.to_dict("records"),
+        [{"name": c.replace("_", " ").upper(), "id": c} for c in df.columns],
+        fig,
+        kpis
+    )
 
 
 if __name__ == "__main__":
-    main()
+    app.run_server(debug=True)
