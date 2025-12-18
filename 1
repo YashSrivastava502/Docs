@@ -1,1 +1,309 @@
+import sqlite3
+import pandas as pd
+from datetime import date
 
+from dash import Dash, dcc, html, dash_table, Input, Output, State
+import dash_bootstrap_components as dbc
+import plotly.express as px
+from flask import Flask, session
+import io
+
+DB_PATH = "metrics.db"
+
+# ================= DB HELPERS =================
+
+def query_db(sql, params=()):
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+def get_os_list():
+    return query_db("SELECT DISTINCT os_type FROM server_daily_metrics")["os_type"].tolist()
+
+
+def get_min_max_dates():
+    df = query_db("""
+        SELECT 
+            MIN(substr(metric_date,1,10)) AS min_date,
+            MAX(substr(metric_date,1,10)) AS max_date
+        FROM server_daily_metrics
+    """)
+    return df.iloc[0]["min_date"], df.iloc[0]["max_date"]
+
+
+# ================= AUTH SETUP =================
+
+VALID_USERS = {
+    "admin": "admin123",
+    "viewer": "viewer123"
+}
+
+server = Flask(__name__)
+server.secret_key = "super-secret-key"
+
+app = Dash(
+    __name__,
+    server=server,
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    suppress_callback_exceptions=True
+)
+app.title = "Server Performance Dashboard"
+
+
+# ================= LOGIN PAGE =================
+
+login_layout = dbc.Container([
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Login"),
+                dbc.CardBody([
+                    dbc.Input(id="username", placeholder="Username", type="text", className="mb-2"),
+                    dbc.Input(id="password", placeholder="Password", type="password", className="mb-3"),
+                    dbc.Button("Login", id="login-btn", color="primary", className="w-100"),
+                    html.Div(id="login-msg", className="text-danger mt-2")
+                ])
+            ])
+        ], width=4)
+    ], justify="center", className="mt-5")
+])
+
+
+# ================= MAIN DASHBOARD =================
+
+min_date, max_date = get_min_max_dates()
+
+dashboard_layout = dbc.Container(fluid=True, children=[
+
+    dbc.Row([
+        dbc.Col([
+            html.H3("Server Performance Dashboard"),
+            html.Small("Windows & Linux | CPU • Memory • Disk", className="text-muted")
+        ], width=10),
+
+        dbc.Col(
+            dbc.Button("Logout", id="logout-btn", color="secondary"),
+            width=2, className="text-end"
+        )
+    ], className="mt-3 mb-4"),
+
+    dbc.Row([
+
+        # ---------- SIDEBAR ----------
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Filters"),
+                dbc.CardBody([
+
+                    html.Label("OS"),
+                    dcc.Dropdown(
+                        id="os-filter",
+                        options=[{"label": x.upper(), "value": x} for x in get_os_list()],
+                        value=get_os_list()[0],
+                        clearable=False
+                    ),
+
+                    html.Br(),
+
+                    html.Label("Date Range"),
+                    dcc.DatePickerRange(
+                        id="date-range",
+                        min_date_allowed=min_date,
+                        max_date_allowed=max_date,
+                        start_date=max_date,
+                        end_date=max_date,
+                        display_format="YYYY-MM-DD"
+                    ),
+
+                    html.Br(), html.Br(),
+
+                    html.Label("Instance contains"),
+                    dbc.Input(id="instance-filter", placeholder="Optional")
+                ])
+            ])
+        ], width=3),
+
+        # ---------- MAIN ----------
+        dbc.Col([
+
+            dbc.Row(id="kpi-row", className="mb-4"),
+
+            dbc.Card([
+                dbc.CardHeader("Top 10 Instances by Max CPU"),
+                dbc.CardBody([
+                    dcc.Graph(id="cpu-chart", config={"displayModeBar": False})
+                ])
+            ], className="mb-4"),
+
+            dbc.Card([
+                dbc.CardHeader([
+                    "Detailed Metrics",
+                    dbc.Button("Export CSV", id="export-csv", color="secondary", size="sm", className="ms-3"),
+                    dbc.Button("Export Excel", id="export-excel", color="secondary", size="sm", className="ms-2"),
+                    dcc.Download(id="download")
+                ]),
+                dbc.CardBody([
+                    dash_table.DataTable(
+                        id="table",
+                        page_size=15,
+                        filter_action="native",
+                        sort_action="native",
+                        style_table={"overflowX": "auto"},
+                        style_cell={"padding": "8px", "fontSize": "13px"},
+                        style_header={"backgroundColor": "#f8f9fa", "fontWeight": "bold"},
+                        style_data_conditional=[
+                            {
+                                "if": {"filter_query": "{max_cpu} >= 80"},
+                                "backgroundColor": "#f8d7da"
+                            },
+                            {
+                                "if": {"filter_query": "{max_mem} >= 80"},
+                                "backgroundColor": "#fff3cd"
+                            },
+                            {
+                                "if": {"filter_query": "{disk_util} >= 80"},
+                                "backgroundColor": "#fde2e2"
+                            }
+                        ]
+                    )
+                ])
+            ])
+
+        ], width=9)
+    ])
+])
+
+
+# ================= APP LAYOUT =================
+
+app.layout = html.Div([
+    dcc.Location(id="url"),
+    html.Div(id="page-content")
+])
+
+
+# ================= ROUTING =================
+
+@app.callback(
+    Output("page-content", "children"),
+    Input("url", "pathname")
+)
+def route(pathname):
+    if session.get("logged_in"):
+        return dashboard_layout
+    return login_layout
+
+
+# ================= LOGIN CALLBACK =================
+
+@app.callback(
+    Output("login-msg", "children"),
+    Input("login-btn", "n_clicks"),
+    State("username", "value"),
+    State("password", "value"),
+    prevent_initial_call=True
+)
+def login(n, u, p):
+    if VALID_USERS.get(u) == p:
+        session["logged_in"] = True
+        return dcc.Location(pathname="/", id="redirect")
+    return "Invalid username or password"
+
+
+@app.callback(
+    Output("url", "pathname"),
+    Input("logout-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def logout(n):
+    session.clear()
+    return "/login"
+
+
+# ================= DASHBOARD CALLBACK =================
+
+@app.callback(
+    Output("table", "data"),
+    Output("table", "columns"),
+    Output("cpu-chart", "figure"),
+    Output("kpi-row", "children"),
+    Input("os-filter", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+    Input("instance-filter", "value")
+)
+def update(os_type, start, end, instance):
+
+    df = query_db("""
+        SELECT instance, max_cpu, avg_cpu, max_mem, avg_mem, disk_util
+        FROM server_daily_metrics
+        WHERE os_type = ?
+          AND substr(metric_date,1,10) BETWEEN ? AND ?
+    """, (os_type, start, end))
+
+    if instance:
+        df = df[df["instance"].str.contains(instance, case=False, na=False)]
+
+    # KPI cards with conditional colors
+    def kpi(title, value):
+        color = "success" if value < 70 else "warning" if value < 85 else "danger"
+        return dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.Small(title),
+                html.H4(f"{value:.2f}%")
+            ]), color=color, inverse=True),
+            width=3
+        )
+
+    kpis = [
+        kpi("Avg Max CPU", df["max_cpu"].mean()),
+        kpi("Avg Max Memory", df["max_mem"].mean()),
+        kpi("Avg Disk Util", df["disk_util"].mean()),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.Small("Total Servers"),
+            html.H4(len(df))
+        ])), width=3)
+    ]
+
+    fig = px.bar(
+        df.sort_values("max_cpu", ascending=False).head(10),
+        x="max_cpu",
+        y="instance",
+        orientation="h",
+        labels={"max_cpu": "Max CPU (%)", "instance": "Instance"}
+    )
+
+    return (
+        df.to_dict("records"),
+        [{"name": c.upper().replace("_", " "), "id": c} for c in df.columns],
+        fig,
+        kpis
+    )
+
+
+# ================= EXPORT =================
+
+@app.callback(
+    Output("download", "data"),
+    Input("export-csv", "n_clicks"),
+    Input("export-excel", "n_clicks"),
+    State("table", "data"),
+    prevent_initial_call=True
+)
+def export(csv_click, excel_click, rows):
+    df = pd.DataFrame(rows)
+
+    if not df.empty and dash.callback_context.triggered_id == "export-csv":
+        return dcc.send_data_frame(df.to_csv, "metrics.csv", index=False)
+
+    if not df.empty and dash.callback_context.triggered_id == "export-excel":
+        buffer = io.BytesIO()
+        df.to_excel(buffer, index=False)
+        buffer.seek(0)
+        return dcc.send_bytes(buffer.read, "metrics.xlsx")
+
+
+# ================= RUN =================
+
+if __name__ == "__main__":
+    app.run(debug=True)
