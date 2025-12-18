@@ -1,46 +1,162 @@
-Azure VM Cost Estimation – Interview Ready
-Scenario:
-Azure Production environment in East US region for a single virtual machine.
+import sqlite3
+import paramiko
+import csv
+import re
+from io import TextIOWrapper
+
+# ================= CONFIG =================
+
+DB_PATH = "metrics.db"
+
+SFTP_HOST = "sftp.yourcompany.com"
+SFTP_PORT = 22
+SFTP_USER = "username"
+SFTP_PASSWORD = "password"
+
+REMOTE_DIR = "/path/to/csv/files"
+
+# =========================================
 
 
-VM Configuration
-- CPU: 4 vCPUs
-- RAM: 64 GB
-- OS Disk: 500 GB Standard SSD
-- Data Disk: 150 GB Standard SSD
-- Operating System: Linux
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS server_daily_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_date TEXT NOT NULL,
+        instance TEXT NOT NULL,
+        os_type TEXT NOT NULL,
+        max_cpu REAL,
+        avg_cpu REAL,
+        max_mem REAL,
+        avg_mem REAL,
+        disk_util REAL,
+        ingested_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(metric_date, instance, os_type)
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ingestion_log (
+        filename TEXT PRIMARY KEY,
+        processed_at TEXT DEFAULT (datetime('now'))
+    );
+    """)
+
+    conn.commit()
+    return conn
 
 
-Recommended Azure VM Size
-Standard_E4s_v5
-- 4 vCPUs
-- 64 GB RAM
-- Suitable for memory-intensive workloads
+def extract_date(filename):
+    match = re.search(r"\d{4}-\d{2}-\d{2}", filename)
+    if not match:
+        raise ValueError(f"Date not found in filename: {filename}")
+    return match.group(0)
 
 
-Cost Breakdown (East US)
-Pricing Model
-Monthly Cost
-Yearly Cost
-Savings
-Pay-As-You-Go
-$391
-$4,692
--
-1-Year Reserved
-$246
-$2,952
-~37%
-3-Year Reserved
-$161
-$1,932
-~59%
-
-Interview Explanation
-For this workload, the E-series VM is chosen due to its high memory-to-core ratio. Using a 3-year Reserved Instance significantly reduces cost for production workloads while providing the same performance and SLA as Pay-As-You-Go.
-Best Practices
-- Use Reserved Instances for predictable workloads
-- Monitor disk utilization to avoid over-provisioning
-- Review Azure Advisor recommendations periodically
+def detect_os(filename):
+    if "Windows" in filename:
+        return "windows"
+    elif "Linux" in filename:
+        return "linux"
+    else:
+        raise ValueError(f"Unknown OS in filename: {filename}")
 
 
+def connect_sftp():
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
+    return paramiko.SFTPClient.from_transport(transport), transport
+
+
+def process_file(conn, sftp, filename):
+    print(f"Processing {filename}")
+
+    metric_date = extract_date(filename)
+    os_type = detect_os(filename)
+
+    if os_type == "windows":
+        disk_col = "C_Drive"
+        max_mem_col = "Max Memory"
+        avg_mem_col = "Avg Memory"
+    else:
+        disk_col = "(/)Util"
+        max_mem_col = "Max_Memory"
+        avg_mem_col = "Avg_Memory"
+
+    with sftp.open(f"{REMOTE_DIR}/{filename}", "r") as f:
+        reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8"))
+        cur = conn.cursor()
+
+        for row in reader:
+            if not row.get("Instance"):
+                continue
+
+            def to_float(x):
+                try:
+                    return float(str(x).strip())
+                except:
+                    return None
+
+            cur.execute("""
+            INSERT INTO server_daily_metrics (
+                metric_date, instance, os_type,
+                max_cpu, avg_cpu, max_mem, avg_mem, disk_util
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(metric_date, instance, os_type)
+            DO UPDATE SET
+                max_cpu=excluded.max_cpu,
+                avg_cpu=excluded.avg_cpu,
+                max_mem=excluded.max_mem,
+                avg_mem=excluded.avg_mem,
+                disk_util=excluded.disk_util;
+            """, (
+                metric_date,
+                row["Instance"].strip(),
+                os_type,
+                to_float(row.get("Max_CPU")),
+                to_float(row.get("Avg_CPU")),
+                to_float(row.get(max_mem_col)),
+                to_float(row.get(avg_mem_col)),
+                to_float(row.get(disk_col))
+            ))
+
+        cur.execute(
+            "INSERT OR REPLACE INTO ingestion_log(filename) VALUES (?)",
+            (filename,)
+        )
+
+        conn.commit()
+        print(f"✔ Loaded {filename}")
+
+
+def main():
+    conn = init_db()
+    sftp, transport = connect_sftp()
+
+    try:
+        cur = conn.cursor()
+        for f in sftp.listdir(REMOTE_DIR):
+
+            if not f.endswith(".csv"):
+                continue
+            if "Last_24_hr" not in f:
+                continue
+
+            cur.execute("SELECT 1 FROM ingestion_log WHERE filename=?", (f,))
+            if cur.fetchone():
+                print(f"Skipping already processed: {f}")
+                continue
+
+            process_file(conn, sftp, f)
+
+    finally:
+        sftp.close()
+        transport.close()
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
