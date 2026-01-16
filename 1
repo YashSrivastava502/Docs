@@ -21,14 +21,14 @@ SQLITE_DB = "global_inventory_test.db"
 TABLE_NAME = "inventory"
 
 # ========================
-# REQUIRED CSV FIELDS
+# REQUIRED COLUMNS (EXACT)
 # ========================
-COLUMNS = [
+REQUIRED_COLUMNS = [
     "AssetUniqueName",
-    "Asset IPAddress",
+    "AssetIPAddress",
     "AssetStatus",
     "AssetLocation",
-    "Asset Type",
+    "AssetType",
     "AssetsApplication/Owner",
     "CostCenter",
     "Environment",
@@ -55,7 +55,6 @@ def fetch_csv_from_sftp():
 
     sftp.close()
     transport.close()
-
     return csv_data
 
 # ========================
@@ -64,7 +63,7 @@ def fetch_csv_from_sftp():
 def load_to_sqlite(df):
     conn = sqlite3.connect(SQLITE_DB)
 
-    create_table_sql = f"""
+    conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         AssetUniqueName TEXT,
         AssetIPAddress TEXT,
@@ -82,26 +81,7 @@ def load_to_sqlite(df):
         ClusterName TEXT,
         HostName TEXT
     )
-    """
-    conn.execute(create_table_sql)
-
-    df.columns = [
-        "AssetUniqueName",
-        "AssetIPAddress",
-        "AssetStatus",
-        "AssetLocation",
-        "AssetType",
-        "AssetsApplicationOwner",
-        "CostCenter",
-        "Environment",
-        "ServerDomain",
-        "ServerOS",
-        "ServerCores",
-        "ServerMemory",
-        "TotalDisk",
-        "ClusterName",
-        "HostName"
-    ]
+    """)
 
     df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
     conn.close()
@@ -110,19 +90,27 @@ def load_to_sqlite(df):
 # MAIN
 # ========================
 def main():
-    print("Fetching CSV from SFTP...")
+    print("Fetching CSV From SFTP...")
     csv_data = fetch_csv_from_sftp()
 
     print("Reading CSV...")
     df = pd.read_csv(StringIO(csv_data))
 
+    print("CSV Columns Found:")
+    print(df.columns.tolist())
+
     print("Filtering required columns...")
-    df = df[COLUMNS]
+    df = df[REQUIRED_COLUMNS]
+
+    # Rename column with slash (DB-safe)
+    df = df.rename(columns={
+        "AssetsApplication/Owner": "AssetsApplicationOwner"
+    })
 
     print("Loading into SQLite...")
     load_to_sqlite(df)
 
-    print("✅ Data successfully loaded into SQLite!")
+    print("✅ Phase-1 completed successfully!")
 
 if __name__ == "__main__":
     main()
