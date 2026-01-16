@@ -1,1 +1,50 @@
+import paramiko
+import os
 
+# ========= CONFIG =========
+SFTP_HOST = "sftp.server.ip.or.hostname"
+SFTP_PORT = 22
+
+SFTP_USERNAME = "your_username"
+SFTP_PASSWORD = "your_password"
+
+REMOTE_DIR = "Network_devices_Backup/Global-Inventory"
+REMOTE_FILE = "Global-SystemInventory.csv"
+
+LOCAL_FILE = r"C:\Global-Inventory\Global-SystemInventory.csv"
+# ==========================
+
+
+def upload_file():
+    if not os.path.exists(LOCAL_FILE):
+        raise FileNotFoundError(f"Local file not found: {LOCAL_FILE}")
+
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    transport.connect(
+        username=SFTP_USERNAME,
+        password=SFTP_PASSWORD
+    )
+
+    sftp = paramiko.SFTPClient.from_transport(transport)
+
+    remote_path = f"{REMOTE_DIR}/{REMOTE_FILE}"
+
+    print(f"Uploading:\n{LOCAL_FILE}\n→ {remote_path}")
+
+    # This automatically OVERWRITES the existing file
+    sftp.put(LOCAL_FILE, remote_path)
+
+    sftp.close()
+    transport.close()
+
+    print("✅ File uploaded successfully (updated on SFTP).")
+
+
+if __name__ == "__main__":
+    upload_file()
+
+
+import os
+
+SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
+    
