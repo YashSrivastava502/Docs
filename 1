@@ -1,7 +1,9 @@
 import paramiko
 import pandas as pd
-import sqlite3
+import psycopg2
+import smtplib
 from io import StringIO
+from email.mime.text import MIMEText
 
 # ========================
 # SFTP CONFIG
@@ -15,15 +17,30 @@ REMOTE_DIR = "/Network_devices_Backup/Global-Inventory"
 REMOTE_FILE = "Global-SystemInventory.csv"
 
 # ========================
-# SQLITE CONFIG
+# POSTGRES CONFIG
 # ========================
-SQLITE_DB = "global_inventory_test.db"
-TABLE_NAME = "inventory"
+PG_ADMIN_DB = "postgres"
+PG_TARGET_DB = "GlobalInventory"
+
+PG_CONFIG = {
+    "host": "",
+    "port": 5432,
+    "user": "postgres",
+    "password": ""
+}
 
 # ========================
-# REQUIRED COLUMNS (EXACT)
+# SMTP CONFIG (NO AUTH)
 # ========================
-REQUIRED_COLUMNS = [
+SMTP_SERVER = "your.smtp.server"
+SMTP_PORT = 25
+MAIL_FROM = "inventory-report@company.com"
+MAIL_TO = ["ops@company.com"]
+
+# ========================
+# REQUIRED COLUMNS
+# ========================
+COLUMNS = [
     "AssetUniqueName",
     "AssetIPAddress",
     "AssetStatus",
@@ -42,30 +59,41 @@ REQUIRED_COLUMNS = [
 ]
 
 # ========================
-# FETCH CSV FROM SFTP
+# FETCH CSV
 # ========================
-def fetch_csv_from_sftp():
+def fetch_csv():
     transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
     transport.connect(username=SFTP_USER, password=SFTP_PASS)
     sftp = paramiko.SFTPClient.from_transport(transport)
 
-    remote_path = f"{REMOTE_DIR}/{REMOTE_FILE}"
-    with sftp.open(remote_path, "r") as f:
-        csv_data = f.read().decode("utf-8")
+    with sftp.open(f"{REMOTE_DIR}/{REMOTE_FILE}") as f:
+        data = f.read().decode("utf-8")
 
     sftp.close()
     transport.close()
-    return csv_data
+    return data
 
 # ========================
-# LOAD INTO SQLITE
+# CREATE DATABASE IF NEEDED
 # ========================
-def load_to_sqlite(df):
-    conn = sqlite3.connect(SQLITE_DB)
+def create_database():
+    conn = psycopg2.connect(dbname=PG_ADMIN_DB, **PG_CONFIG)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(f"SELECT 1 FROM pg_database WHERE datname='{PG_TARGET_DB}'")
+    if not cur.fetchone():
+        cur.execute(f'CREATE DATABASE "{PG_TARGET_DB}"')
+    cur.close()
+    conn.close()
 
-    conn.execute(f"""
-    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-        AssetUniqueName TEXT,
+# ========================
+# CREATE TABLE IF NEEDED
+# ========================
+def create_table(conn):
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+        AssetUniqueName TEXT PRIMARY KEY,
         AssetIPAddress TEXT,
         AssetStatus TEXT,
         AssetLocation TEXT,
@@ -82,35 +110,96 @@ def load_to_sqlite(df):
         HostName TEXT
     )
     """)
+    conn.commit()
+    cur.close()
 
-    df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
-    conn.close()
+# ========================
+# FETCH EXISTING DATA
+# ========================
+def fetch_existing(conn):
+    return pd.read_sql("SELECT * FROM inventory", conn)
+
+# ========================
+# UPSERT & CHANGE TRACKING
+# ========================
+def upsert_and_track(conn, df_new, df_old):
+    changes = []
+    cur = conn.cursor()
+
+    df_old = df_old.set_index("AssetUniqueName") if not df_old.empty else pd.DataFrame()
+
+    for _, row in df_new.iterrows():
+        key = row["AssetUniqueName"]
+
+        if key in df_old.index:
+            old_row = df_old.loc[key]
+            for col in df_new.columns:
+                if str(old_row[col]) != str(row[col]):
+                    changes.append(
+                        f"{key} | {col} | {old_row[col]} -> {row[col]}"
+                    )
+
+        cur.execute("""
+        INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (AssetUniqueName) DO UPDATE SET
+        AssetIPAddress=EXCLUDED.AssetIPAddress,
+        AssetStatus=EXCLUDED.AssetStatus,
+        AssetLocation=EXCLUDED.AssetLocation,
+        AssetType=EXCLUDED.AssetType,
+        AssetsApplicationOwner=EXCLUDED.AssetsApplicationOwner,
+        CostCenter=EXCLUDED.CostCenter,
+        Environment=EXCLUDED.Environment,
+        ServerDomain=EXCLUDED.ServerDomain,
+        ServerOS=EXCLUDED.ServerOS,
+        ServerCores=EXCLUDED.ServerCores,
+        ServerMemory=EXCLUDED.ServerMemory,
+        TotalDisk=EXCLUDED.TotalDisk,
+        ClusterName=EXCLUDED.ClusterName,
+        HostName=EXCLUDED.HostName
+        """, tuple(row))
+
+    conn.commit()
+    cur.close()
+    return changes
+
+# ========================
+# SEND EMAIL
+# ========================
+def send_mail(changes):
+    if not changes:
+        body = "No changes detected in Global Inventory."
+    else:
+        body = "Global Inventory Changes:\n\n" + "\n".join(changes)
+
+    msg = MIMEText(body)
+    msg["Subject"] = "Weekly Global Inventory Update Report"
+    msg["From"] = MAIL_FROM
+    msg["To"] = ", ".join(MAIL_TO)
+
+    smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+    smtp.sendmail(MAIL_FROM, MAIL_TO, msg.as_string())
+    smtp.quit()
 
 # ========================
 # MAIN
 # ========================
 def main():
-    print("Fetching CSV From SFTP...")
-    csv_data = fetch_csv_from_sftp()
+    csv_data = fetch_csv()
+    df = pd.read_csv(StringIO(csv_data))[COLUMNS]
+    df = df.rename(columns={"AssetsApplication/Owner": "AssetsApplicationOwner"})
 
-    print("Reading CSV...")
-    df = pd.read_csv(StringIO(csv_data))
+    create_database()
 
-    print("CSV Columns Found:")
-    print(df.columns.tolist())
+    conn = psycopg2.connect(dbname=PG_TARGET_DB, **PG_CONFIG)
+    create_table(conn)
 
-    print("Filtering required columns...")
-    df = df[REQUIRED_COLUMNS]
+    df_old = fetch_existing(conn)
+    changes = upsert_and_track(conn, df, df_old)
 
-    # Rename column with slash (DB-safe)
-    df = df.rename(columns={
-        "AssetsApplication/Owner": "AssetsApplicationOwner"
-    })
+    send_mail(changes)
+    conn.close()
 
-    print("Loading into SQLite...")
-    load_to_sqlite(df)
-
-    print("✅ Phase-1 completed successfully!")
+    print("✅ Phase-2 completed successfully")
 
 if __name__ == "__main__":
     main()
