@@ -1,1 +1,213 @@
+import paramiko
+import pandas as pd
+import psycopg2
+from io import StringIO
 
+# ========================
+# SFTP CONFIG
+# ========================
+SFTP_HOST = "your_sftp_host"
+SFTP_PORT = 22
+SFTP_USER = "your_sftp_user"
+SFTP_PASS = "your_sftp_password"
+
+REMOTE_DIR = "/Network_devices_Backup/Global-Inventory"
+REMOTE_FILE = "Global-SystemInventory.csv"
+
+# ========================
+# POSTGRES CONFIG
+# ========================
+PG_HOST = "10.7.32.181"
+PG_PORT = 5432
+PG_USER = "postgres"
+PG_PASS = "mc6Qld8x0910"
+TARGET_DB = "GlobalInventory"
+
+# ========================
+# CSV COLUMNS
+# ========================
+CSV_COLUMNS = [
+    "AssetUniqueName",
+    "AssetIPAddress",
+    "AssetStatus",
+    "AssetLocation",
+    "AssetType",
+    "AssetsApplication/Owner",
+    "CostCenter",
+    "Environment",
+    "ServerDomain",
+    "ServerOS",
+    "ServerCores",
+    "ServerMemory",
+    "TotalDisk",
+    "ClusterName",
+    "HostName"
+]
+
+# ========================
+# FETCH CSV FROM SFTP
+# ========================
+def fetch_csv():
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    transport.connect(username=SFTP_USER, password=SFTP_PASS)
+    sftp = paramiko.SFTPClient.from_transport(transport)
+    with sftp.open(f"{REMOTE_DIR}/{REMOTE_FILE}", "r") as f:
+        data = f.read().decode("utf-8")
+    sftp.close()
+    transport.close()
+    return data
+
+# ========================
+# ENSURE DATABASE EXISTS
+# ========================
+def ensure_database():
+    conn = psycopg2.connect(
+        host=PG_HOST, port=PG_PORT,
+        user=PG_USER, password=PG_PASS,
+        dbname="postgres"
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (TARGET_DB,))
+    if not cur.fetchone():
+        cur.execute(f'CREATE DATABASE "{TARGET_DB}"')
+    cur.close()
+    conn.close()
+
+# ========================
+# CONNECT TARGET DB
+# ========================
+def connect_db():
+    return psycopg2.connect(
+        host=PG_HOST, port=PG_PORT,
+        user=PG_USER, password=PG_PASS,
+        dbname=TARGET_DB
+    )
+
+# ========================
+# CREATE TABLES (FRESH)
+# ========================
+def create_tables(conn):
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+        assetuniquename TEXT PRIMARY KEY,
+        assetipaddress TEXT,
+        assetstatus TEXT,
+        assetlocation TEXT,
+        assettype TEXT,
+        assetsapplicationowner TEXT,
+        costcenter TEXT,
+        environment TEXT,
+        serverdomain TEXT,
+        serveros TEXT,
+        servercores TEXT,
+        servermemory TEXT,
+        totaldisk TEXT,
+        clustername TEXT,
+        hostname TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory_change_audit (
+        id BIGSERIAL PRIMARY KEY,
+        asset_unique_name TEXT,
+        column_name TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        change_type TEXT,
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+
+# ========================
+# FETCH EXISTING DATA (FIXED)
+# ========================
+def fetch_existing(conn):
+    return pd.read_sql("SELECT * FROM inventory", conn)
+
+# ========================
+# UPSERT + AUDIT
+# ========================
+def upsert_and_audit(conn, df_new, df_old):
+    cur = conn.cursor()
+    changes = []
+
+    if not df_old.empty:
+        df_old = df_old.set_index("assetuniquename")
+
+    for _, row in df_new.iterrows():
+        asset = row["assetuniquename"]
+
+        if asset in df_old.index:
+            old_row = df_old.loc[asset]
+            for col in df_new.columns:
+                old_val = str(old_row[col])
+                new_val = str(row[col])
+                if old_val != new_val:
+                    cur.execute("""
+                        INSERT INTO inventory_change_audit
+                        (asset_unique_name, column_name, old_value, new_value, change_type)
+                        VALUES (%s,%s,%s,%s,'UPDATE')
+                    """, (asset, col, old_val, new_val))
+        else:
+            cur.execute("""
+                INSERT INTO inventory_change_audit
+                (asset_unique_name, column_name, old_value, new_value, change_type)
+                VALUES (%s,'*',NULL,'NEW ROW','INSERT')
+            """, (asset,))
+
+        cur.execute("""
+        INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (assetuniquename) DO UPDATE SET
+        assetipaddress=EXCLUDED.assetipaddress,
+        assetstatus=EXCLUDED.assetstatus,
+        assetlocation=EXCLUDED.assetlocation,
+        assettype=EXCLUDED.assettype,
+        assetsapplicationowner=EXCLUDED.assetsapplicationowner,
+        costcenter=EXCLUDED.costcenter,
+        environment=EXCLUDED.environment,
+        serverdomain=EXCLUDED.serverdomain,
+        serveros=EXCLUDED.serveros,
+        servercores=EXCLUDED.servercores,
+        servermemory=EXCLUDED.servermemory,
+        totaldisk=EXCLUDED.totaldisk,
+        clustername=EXCLUDED.clustername,
+        hostname=EXCLUDED.hostname
+        """, tuple(row.values))
+
+    conn.commit()
+    cur.close()
+
+# ========================
+# MAIN
+# ========================
+def main():
+    csv_data = fetch_csv()
+
+    df = pd.read_csv(StringIO(csv_data))[CSV_COLUMNS]
+    df = df.rename(columns={"AssetsApplication/Owner": "AssetsApplicationOwner"})
+    df.columns = [c.lower() for c in df.columns]
+
+    # HARD CLEANING
+    df = df.fillna("")
+    for col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
+
+    ensure_database()
+    conn = connect_db()
+    create_tables(conn)
+
+    df_old = fetch_existing(conn)
+    upsert_and_audit(conn, df, df_old)
+
+    conn.close()
+    print("✅ ETL completed successfully")
+
+if __name__ == "__main__":
+    main()
