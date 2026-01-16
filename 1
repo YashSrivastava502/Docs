@@ -1,50 +1,128 @@
 import paramiko
-import os
+import pandas as pd
+import sqlite3
+from io import StringIO
 
-# ========= CONFIG =========
-SFTP_HOST = "sftp.server.ip.or.hostname"
+# ========================
+# SFTP CONFIG
+# ========================
+SFTP_HOST = "your_sftp_host"
 SFTP_PORT = 22
+SFTP_USER = "your_sftp_user"
+SFTP_PASS = "your_sftp_password"
 
-SFTP_USERNAME = "your_username"
-SFTP_PASSWORD = "your_password"
-
-REMOTE_DIR = "Network_devices_Backup/Global-Inventory"
+REMOTE_DIR = "/Network_devices_Backup/Global-Inventory"
 REMOTE_FILE = "Global-SystemInventory.csv"
 
-LOCAL_FILE = r"C:\Global-Inventory\Global-SystemInventory.csv"
-# ==========================
+# ========================
+# SQLITE CONFIG
+# ========================
+SQLITE_DB = "global_inventory_test.db"
+TABLE_NAME = "inventory"
 
+# ========================
+# REQUIRED CSV FIELDS
+# ========================
+COLUMNS = [
+    "AssetUniqueName",
+    "Asset IPAddress",
+    "AssetStatus",
+    "AssetLocation",
+    "Asset Type",
+    "AssetsApplication/Owner",
+    "CostCenter",
+    "Environment",
+    "ServerDomain",
+    "ServerOS",
+    "ServerCores",
+    "ServerMemory",
+    "TotalDisk",
+    "ClusterName",
+    "HostName"
+]
 
-def upload_file():
-    if not os.path.exists(LOCAL_FILE):
-        raise FileNotFoundError(f"Local file not found: {LOCAL_FILE}")
-
+# ========================
+# FETCH CSV FROM SFTP
+# ========================
+def fetch_csv_from_sftp():
     transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
-    transport.connect(
-        username=SFTP_USERNAME,
-        password=SFTP_PASSWORD
-    )
-
+    transport.connect(username=SFTP_USER, password=SFTP_PASS)
     sftp = paramiko.SFTPClient.from_transport(transport)
 
     remote_path = f"{REMOTE_DIR}/{REMOTE_FILE}"
-
-    print(f"Uploading:\n{LOCAL_FILE}\n→ {remote_path}")
-
-    # This automatically OVERWRITES the existing file
-    sftp.put(LOCAL_FILE, remote_path)
+    with sftp.open(remote_path, "r") as f:
+        csv_data = f.read().decode("utf-8")
 
     sftp.close()
     transport.close()
 
-    print("✅ File uploaded successfully (updated on SFTP).")
+    return csv_data
 
+# ========================
+# LOAD INTO SQLITE
+# ========================
+def load_to_sqlite(df):
+    conn = sqlite3.connect(SQLITE_DB)
+
+    create_table_sql = f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+        AssetUniqueName TEXT,
+        AssetIPAddress TEXT,
+        AssetStatus TEXT,
+        AssetLocation TEXT,
+        AssetType TEXT,
+        AssetsApplicationOwner TEXT,
+        CostCenter TEXT,
+        Environment TEXT,
+        ServerDomain TEXT,
+        ServerOS TEXT,
+        ServerCores INTEGER,
+        ServerMemory TEXT,
+        TotalDisk TEXT,
+        ClusterName TEXT,
+        HostName TEXT
+    )
+    """
+    conn.execute(create_table_sql)
+
+    df.columns = [
+        "AssetUniqueName",
+        "AssetIPAddress",
+        "AssetStatus",
+        "AssetLocation",
+        "AssetType",
+        "AssetsApplicationOwner",
+        "CostCenter",
+        "Environment",
+        "ServerDomain",
+        "ServerOS",
+        "ServerCores",
+        "ServerMemory",
+        "TotalDisk",
+        "ClusterName",
+        "HostName"
+    ]
+
+    df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
+    conn.close()
+
+# ========================
+# MAIN
+# ========================
+def main():
+    print("Fetching CSV from SFTP...")
+    csv_data = fetch_csv_from_sftp()
+
+    print("Reading CSV...")
+    df = pd.read_csv(StringIO(csv_data))
+
+    print("Filtering required columns...")
+    df = df[COLUMNS]
+
+    print("Loading into SQLite...")
+    load_to_sqlite(df)
+
+    print("✅ Data successfully loaded into SQLite!")
 
 if __name__ == "__main__":
-    upload_file()
-
-
-import os
-
-SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
-    
+    main()
