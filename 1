@@ -1,12 +1,13 @@
 import paramiko
-import pandas as pd
 import psycopg2
+import psycopg2.extras
+import pandas as pd
 import smtplib
 from io import StringIO
 from email.mime.text import MIMEText
 
 # ========================
-# SFTP CONFIG
+# CONFIG
 # ========================
 SFTP_HOST = "your_sftp_host"
 SFTP_PORT = 22
@@ -16,42 +17,22 @@ SFTP_PASS = "your_sftp_password"
 REMOTE_DIR = "/Network_devices_Backup/Global-Inventory"
 REMOTE_FILE = "Global-SystemInventory.csv"
 
-# ========================
-# POSTGRES CONFIG
-# ========================
 PG_HOST = "10.7.32.181"
 PG_PORT = 5432
 PG_USER = "postgres"
 PG_PASS = "mc6Qld8x0910"
 TARGET_DB = "GlobalInventory"
 
-# ========================
-# SMTP CONFIG (NO AUTH)
-# ========================
 SMTP_SERVER = "your.smtp.server"
 SMTP_PORT = 25
 MAIL_FROM = "inventory-report@company.com"
 MAIL_TO = ["ops@company.com"]
 
-# ========================
-# CSV COLUMNS
-# ========================
 CSV_COLUMNS = [
-    "AssetUniqueName",
-    "AssetIPAddress",
-    "AssetStatus",
-    "AssetLocation",
-    "AssetType",
-    "AssetsApplication/Owner",
-    "CostCenter",
-    "Environment",
-    "ServerDomain",
-    "ServerOS",
-    "ServerCores",
-    "ServerMemory",
-    "TotalDisk",
-    "ClusterName",
-    "HostName"
+    "AssetUniqueName", "AssetIPAddress", "AssetStatus", "AssetLocation",
+    "AssetType", "AssetsApplication/Owner", "CostCenter", "Environment",
+    "ServerDomain", "ServerOS", "ServerCores", "ServerMemory",
+    "TotalDisk", "ClusterName", "HostName"
 ]
 
 # ========================
@@ -70,28 +51,9 @@ def fetch_csv():
     return data
 
 # ========================
-# ENSURE DATABASE EXISTS
+# DB CONNECTION
 # ========================
-def ensure_database():
-    conn = psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        user=PG_USER,
-        password=PG_PASS,
-        dbname="postgres"
-    )
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (TARGET_DB,))
-    if not cur.fetchone():
-        cur.execute(f'CREATE DATABASE "{TARGET_DB}"')
-    cur.close()
-    conn.close()
-
-# ========================
-# CONNECT TARGET DB
-# ========================
-def connect_db():
+def get_conn():
     return psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
@@ -145,66 +107,19 @@ def create_tables(conn):
 # FETCH EXISTING DATA
 # ========================
 def fetch_existing(conn):
-    return pd.read_sql("SELECT * FROM inventory", conn)
-
-# ========================
-# UPSERT + AUDIT
-# ========================
-def upsert_and_audit(conn, df_new, df_old):
     cur = conn.cursor()
-    changes = []
-
-    if not df_old.empty:
-        df_old = df_old.set_index("assetuniquename")
-
-    for _, row in df_new.iterrows():
-        asset = row["assetuniquename"]
-
-        if asset in df_old.index:
-            old_row = df_old.loc[asset]
-            for col in df_new.columns:
-                old_val = str(old_row[col])
-                new_val = str(row[col])
-                if old_val != new_val:
-                    cur.execute("""
-                        INSERT INTO inventory_change_audit
-                        (asset_unique_name, column_name, old_value, new_value, change_type)
-                        VALUES (%s,%s,%s,%s,'UPDATE')
-                    """, (asset, col, old_val, new_val))
-                    changes.append(f"{asset} | {col} | {old_val} -> {new_val}")
-        else:
-            cur.execute("""
-                INSERT INTO inventory_change_audit
-                (asset_unique_name, column_name, old_value, new_value, change_type)
-                VALUES (%s,'*',NULL,'NEW ROW','INSERT')
-            """, (asset,))
-            changes.append(f"{asset} | NEW ROW")
-
-        cur.execute("""
-        INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (assetuniquename) DO UPDATE SET
-        assetipaddress=EXCLUDED.assetipaddress,
-        assetstatus=EXCLUDED.assetstatus,
-        assetlocation=EXCLUDED.assetlocation,
-        assettype=EXCLUDED.assettype,
-        assetsapplicationowner=EXCLUDED.assetsapplicationowner,
-        costcenter=EXCLUDED.costcenter,
-        environment=EXCLUDED.environment,
-        serverdomain=EXCLUDED.serverdomain,
-        serveros=EXCLUDED.serveros,
-        servercores=EXCLUDED.servercores,
-        servermemory=EXCLUDED.servermemory,
-        totaldisk=EXCLUDED.totaldisk,
-        clustername=EXCLUDED.clustername,
-        hostname=EXCLUDED.hostname
-        """, tuple(row.values))
-
-    conn.commit()
+    cur.execute("SELECT * FROM inventory")
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
     cur.close()
-    return changes
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    return pd.DataFrame(rows, columns=cols).set_index("assetuniquename")
 
 # ========================
-# SEND EMAIL (NO AUTH)
+# SEND EMAIL
 # ========================
 def send_mail(changes):
     if not changes:
@@ -222,31 +137,96 @@ def send_mail(changes):
     smtp.quit()
 
 # ========================
-# MAIN
+# MAIN ETL
 # ========================
 def main():
+    # ---- Fetch CSV ----
     csv_data = fetch_csv()
-
     df = pd.read_csv(StringIO(csv_data))[CSV_COLUMNS]
+
     df = df.rename(columns={"AssetsApplication/Owner": "AssetsApplicationOwner"})
     df.columns = [c.lower() for c in df.columns]
+    df = df.fillna("").astype(str)
 
-    # HARD CLEANING
-    df = df.fillna("")
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-
-    ensure_database()
-    conn = connect_db()
+    # ---- DB ----
+    conn = get_conn()
     create_tables(conn)
 
-    df_old = fetch_existing(conn)
-    changes = upsert_and_audit(conn, df, df_old)
+    existing_df = fetch_existing(conn)
 
-    send_mail(changes)
+    inventory_rows = []
+    audit_rows = []
+    mail_changes = []
 
+    for _, row in df.iterrows():
+        asset = row["assetuniquename"]
+
+        if asset in existing_df.index:
+            old = existing_df.loc[asset]
+            for col in df.columns:
+                if str(old[col]) != str(row[col]):
+                    audit_rows.append(
+                        (asset, col, old[col], row[col], "UPDATE")
+                    )
+                    mail_changes.append(
+                        f"{asset} | {col} | {old[col]} -> {row[col]}"
+                    )
+        else:
+            audit_rows.append(
+                (asset, "*", None, "NEW ROW", "INSERT")
+            )
+            mail_changes.append(f"{asset} | NEW ROW")
+
+        inventory_rows.append(tuple(row.values))
+
+    cur = conn.cursor()
+
+    # ---- Batch UPSERT ----
+    psycopg2.extras.execute_batch(
+        cur,
+        """
+        INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (assetuniquename) DO UPDATE SET
+        assetipaddress=EXCLUDED.assetipaddress,
+        assetstatus=EXCLUDED.assetstatus,
+        assetlocation=EXCLUDED.assetlocation,
+        assettype=EXCLUDED.assettype,
+        assetsapplicationowner=EXCLUDED.assetsapplicationowner,
+        costcenter=EXCLUDED.costcenter,
+        environment=EXCLUDED.environment,
+        serverdomain=EXCLUDED.serverdomain,
+        serveros=EXCLUDED.serveros,
+        servercores=EXCLUDED.servercores,
+        servermemory=EXCLUDED.servermemory,
+        totaldisk=EXCLUDED.totaldisk,
+        clustername=EXCLUDED.clustername,
+        hostname=EXCLUDED.hostname
+        """,
+        inventory_rows,
+        page_size=500
+    )
+
+    # ---- Batch AUDIT ----
+    if audit_rows:
+        psycopg2.extras.execute_batch(
+            cur,
+            """
+            INSERT INTO inventory_change_audit
+            (asset_unique_name, column_name, old_value, new_value, change_type)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            audit_rows,
+            page_size=500
+        )
+
+    conn.commit()
+    cur.close()
     conn.close()
-    print(" ETL completed successfully")
+
+    # ---- Email ----
+    send_mail(mail_changes)
+
+    print("✅ ETL completed (best practice + email)")
 
 if __name__ == "__main__":
     main()
