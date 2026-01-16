@@ -1,7 +1,9 @@
 import paramiko
 import pandas as pd
 import psycopg2
+import smtplib
 from io import StringIO
+from email.mime.text import MIMEText
 
 # ========================
 # SFTP CONFIG
@@ -22,6 +24,14 @@ PG_PORT = 5432
 PG_USER = "postgres"
 PG_PASS = "mc6Qld8x0910"
 TARGET_DB = "GlobalInventory"
+
+# ========================
+# SMTP CONFIG (NO AUTH)
+# ========================
+SMTP_SERVER = "your.smtp.server"
+SMTP_PORT = 25
+MAIL_FROM = "inventory-report@company.com"
+MAIL_TO = ["ops@company.com"]
 
 # ========================
 # CSV COLUMNS
@@ -51,8 +61,10 @@ def fetch_csv():
     transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
     transport.connect(username=SFTP_USER, password=SFTP_PASS)
     sftp = paramiko.SFTPClient.from_transport(transport)
+
     with sftp.open(f"{REMOTE_DIR}/{REMOTE_FILE}", "r") as f:
         data = f.read().decode("utf-8")
+
     sftp.close()
     transport.close()
     return data
@@ -62,8 +74,10 @@ def fetch_csv():
 # ========================
 def ensure_database():
     conn = psycopg2.connect(
-        host=PG_HOST, port=PG_PORT,
-        user=PG_USER, password=PG_PASS,
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PASS,
         dbname="postgres"
     )
     conn.autocommit = True
@@ -79,13 +93,15 @@ def ensure_database():
 # ========================
 def connect_db():
     return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT,
-        user=PG_USER, password=PG_PASS,
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PASS,
         dbname=TARGET_DB
     )
 
 # ========================
-# CREATE TABLES (FRESH)
+# CREATE TABLES
 # ========================
 def create_tables(conn):
     cur = conn.cursor()
@@ -126,7 +142,7 @@ def create_tables(conn):
     cur.close()
 
 # ========================
-# FETCH EXISTING DATA (FIXED)
+# FETCH EXISTING DATA
 # ========================
 def fetch_existing(conn):
     return pd.read_sql("SELECT * FROM inventory", conn)
@@ -155,12 +171,14 @@ def upsert_and_audit(conn, df_new, df_old):
                         (asset_unique_name, column_name, old_value, new_value, change_type)
                         VALUES (%s,%s,%s,%s,'UPDATE')
                     """, (asset, col, old_val, new_val))
+                    changes.append(f"{asset} | {col} | {old_val} -> {new_val}")
         else:
             cur.execute("""
                 INSERT INTO inventory_change_audit
                 (asset_unique_name, column_name, old_value, new_value, change_type)
                 VALUES (%s,'*',NULL,'NEW ROW','INSERT')
             """, (asset,))
+            changes.append(f"{asset} | NEW ROW")
 
         cur.execute("""
         INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -183,6 +201,25 @@ def upsert_and_audit(conn, df_new, df_old):
 
     conn.commit()
     cur.close()
+    return changes
+
+# ========================
+# SEND EMAIL (NO AUTH)
+# ========================
+def send_mail(changes):
+    if not changes:
+        print("No changes detected, email not sent.")
+        return
+
+    body = "Global Inventory Change Report:\n\n" + "\n".join(changes)
+    msg = MIMEText(body)
+    msg["Subject"] = "Weekly Global Inventory Change Report"
+    msg["From"] = MAIL_FROM
+    msg["To"] = ", ".join(MAIL_TO)
+
+    smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+    smtp.sendmail(MAIL_FROM, MAIL_TO, msg.as_string())
+    smtp.quit()
 
 # ========================
 # MAIN
@@ -204,10 +241,12 @@ def main():
     create_tables(conn)
 
     df_old = fetch_existing(conn)
-    upsert_and_audit(conn, df, df_old)
+    changes = upsert_and_audit(conn, df, df_old)
+
+    send_mail(changes)
 
     conn.close()
-    print("✅ ETL completed successfully")
+    print(" ETL completed successfully")
 
 if __name__ == "__main__":
     main()
