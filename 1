@@ -1,1 +1,242 @@
+import paramiko
+import psycopg2
+import psycopg2.extras
+import pandas as pd
+import smtplib
+from io import StringIO
+from email.mime.text import MIMEText
 
+# ========================
+# CONFIG
+# ========================
+SFTP_HOST = "your_sftp_host"
+SFTP_PORT = 22
+SFTP_USER = "your_sftp_user"
+SFTP_PASS = "your_sftp_password"
+
+REMOTE_DIR = "/Network_devices_Backup/Global-Inventory"
+REMOTE_FILE = "Global-SystemInventory.csv"
+
+PG_HOST = "10.7.32.181"
+PG_PORT = 5432
+PG_USER = "postgres"
+PG_PASS = "mc6Qld8x0910"
+TARGET_DB = "GlobalInventory"
+
+SMTP_SERVER = "your.smtp.server"
+SMTP_PORT = 25
+MAIL_FROM = "inventory-report@company.com"
+MAIL_TO = ["ops@company.com"]
+
+CSV_COLUMNS = [
+    "AssetUniqueName",
+    "AssetIPAddress",
+    "AssetStatus",
+    "AssetLocation",
+    "AssetType",
+    "AssetsApplication/Owner",
+    "CostCenter",
+    "Environment",
+    "ServerDomain",
+    "ServerOS",
+    "ServerCores",
+    "ServerMemory",
+    "TotalDisk",
+    "ClusterName",
+    "HostName"
+]
+
+# ========================
+# FETCH CSV FROM SFTP
+# ========================
+def fetch_csv():
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    transport.connect(username=SFTP_USER, password=SFTP_PASS)
+    sftp = paramiko.SFTPClient.from_transport(transport)
+    with sftp.open(f"{REMOTE_DIR}/{REMOTE_FILE}", "r") as f:
+        data = f.read().decode("utf-8")
+    sftp.close()
+    transport.close()
+    return data
+
+# ========================
+# DB CONNECTION
+# ========================
+def get_conn():
+    return psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PASS,
+        dbname=TARGET_DB
+    )
+
+# ========================
+# CREATE TABLES
+# ========================
+def create_tables(conn):
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+        assetuniquename TEXT PRIMARY KEY,
+        assetipaddress TEXT,
+        assetstatus TEXT,
+        assetlocation TEXT,
+        assettype TEXT,
+        assetsapplicationowner TEXT,
+        costcenter TEXT,
+        environment TEXT,
+        serverdomain TEXT,
+        serveros TEXT,
+        servercores TEXT,
+        servermemory TEXT,
+        totaldisk TEXT,
+        clustername TEXT,
+        hostname TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory_change_audit (
+        id BIGSERIAL PRIMARY KEY,
+        asset_unique_name TEXT,
+        column_name TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        change_type TEXT,
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+
+# ========================
+# FETCH EXISTING DATA (FIXED)
+# ========================
+def fetch_existing(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM inventory")
+    rows = cur.fetchall()
+    cols = [c[0].lower().strip() for c in cur.description]
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.DataFrame(rows, columns=cols)
+    return df.set_index("assetuniquename")
+
+# ========================
+# SEND EMAIL
+# ========================
+def send_mail(changes):
+    if not changes:
+        print("No changes detected, email not sent.")
+        return
+
+    body = "Global Inventory Change Report:\n\n" + "\n".join(changes)
+    msg = MIMEText(body)
+    msg["Subject"] = "Weekly Global Inventory Change Report"
+    msg["From"] = MAIL_FROM
+    msg["To"] = ", ".join(MAIL_TO)
+
+    smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+    smtp.sendmail(MAIL_FROM, MAIL_TO, msg.as_string())
+    smtp.quit()
+
+# ========================
+# MAIN ETL
+# ========================
+def main():
+    # ---- Fetch CSV ----
+    csv_data = fetch_csv()
+
+    df = pd.read_csv(StringIO(csv_data))[CSV_COLUMNS]
+    df = df.rename(columns={"AssetsApplication/Owner": "AssetsApplicationOwner"})
+    df.columns = [c.lower().strip() for c in df.columns]
+    df = df.fillna("").astype(str)
+
+    # ---- DB ----
+    conn = get_conn()
+    create_tables(conn)
+
+    existing_df = fetch_existing(conn)
+
+    inventory_rows = []
+    audit_rows = []
+    mail_changes = []
+
+    for _, row in df.iterrows():
+        asset = row["assetuniquename"]
+
+        if asset in existing_df.index:
+            old = existing_df.loc[asset]
+            for col in df.columns:
+                if str(old[col]) != str(row[col]):
+                    audit_rows.append(
+                        (asset, col, old[col], row[col], "UPDATE")
+                    )
+                    mail_changes.append(
+                        f"{asset} | {col} | {old[col]} -> {row[col]}"
+                    )
+        else:
+            audit_rows.append(
+                (asset, "*", None, "NEW ROW", "INSERT")
+            )
+            mail_changes.append(f"{asset} | NEW ROW")
+
+        inventory_rows.append(tuple(row.values))
+
+    cur = conn.cursor()
+
+    # ---- Batch UPSERT ----
+    psycopg2.extras.execute_batch(
+        cur,
+        """
+        INSERT INTO inventory VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (assetuniquename) DO UPDATE SET
+        assetipaddress=EXCLUDED.assetipaddress,
+        assetstatus=EXCLUDED.assetstatus,
+        assetlocation=EXCLUDED.assetlocation,
+        assettype=EXCLUDED.assettype,
+        assetsapplicationowner=EXCLUDED.assetsapplicationowner,
+        costcenter=EXCLUDED.costcenter,
+        environment=EXCLUDED.environment,
+        serverdomain=EXCLUDED.serverdomain,
+        serveros=EXCLUDED.serveros,
+        servercores=EXCLUDED.servercores,
+        servermemory=EXCLUDED.servermemory,
+        totaldisk=EXCLUDED.totaldisk,
+        clustername=EXCLUDED.clustername,
+        hostname=EXCLUDED.hostname
+        """,
+        inventory_rows,
+        page_size=500
+    )
+
+    # ---- Batch AUDIT ----
+    if audit_rows:
+        psycopg2.extras.execute_batch(
+            cur,
+            """
+            INSERT INTO inventory_change_audit
+            (asset_unique_name, column_name, old_value, new_value, change_type)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            audit_rows,
+            page_size=500
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    # ---- Email ----
+    send_mail(mail_changes)
+
+    print("✅ ETL completed successfully (best practice)")
+
+if __name__ == "__main__":
+    main()
