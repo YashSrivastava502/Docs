@@ -131,13 +131,11 @@ def send_mail(changes):
     if not changes:
         print("No changes detected, email not sent.")
         return
-
     body = "Global Inventory Change Report:\n\n" + "\n".join(changes)
     msg = MIMEText(body)
     msg["Subject"] = "Weekly Global Inventory Change Report"
     msg["From"] = MAIL_FROM
     msg["To"] = ", ".join(MAIL_TO)
-
     smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
     smtp.sendmail(MAIL_FROM, MAIL_TO, msg.as_string())
     smtp.quit()
@@ -157,7 +155,7 @@ def main():
     create_tables(conn)
 
     existing_df = fetch_existing(conn)
-    has_existing_data = not existing_df.empty  # 🔑 KEY FIX
+    has_existing_data = not existing_df.empty
 
     inventory_rows = []
     audit_rows = []
@@ -169,6 +167,8 @@ def main():
         if has_existing_data and asset in existing_df.index:
             old = existing_df.loc[asset]
             for col in df.columns:
+                if col == "assetuniquename":   # 🔑 FINAL FIX
+                    continue
                 if str(old[col]) != str(row[col]):
                     audit_rows.append(
                         (asset, col, old[col], row[col], "UPDATE")
@@ -228,7 +228,7 @@ def main():
 
     send_mail(mail_changes)
 
-    print("✅ ETL completed successfully (FINAL FIXED)")
+    print("✅ ETL completed successfully (ABSOLUTELY FIXED)")
 
 if __name__ == "__main__":
     main()
