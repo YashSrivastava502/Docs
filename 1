@@ -1,16 +1,192 @@
-cur.execute("""
-INSERT INTO server_capacity_master
-(assetuniquename, total_cpu, total_ram_gb, total_storage_gb)
-SELECT
-    assetuniquename,
-    COALESCE(NULLIF(servercores, '')::NUMERIC, 0),
-    COALESCE(NULLIF(servermemory, '')::NUMERIC, 0) / 1024,
-    COALESCE(NULLIF(totaldisk, '')::NUMERIC, 0)
-FROM inventory
-ON CONFLICT (assetuniquename)
-DO UPDATE SET
-    total_cpu = EXCLUDED.total_cpu,
-    total_ram_gb = EXCLUDED.total_ram_gb,
-    total_storage_gb = EXCLUDED.total_storage_gb,
-    last_synced = CURRENT_TIMESTAMP;
-""")
+from dash import Dash, html, dcc, Input, Output, State
+import psycopg2
+
+# ================= CONFIG =================
+DB = dict(
+    host="10.7.32.181",
+    dbname="GlobalInventory",
+    user="postgres",
+    password="mc6Qld8x0910"
+)
+
+RESERVED_PERCENT = 30
+ALERT_THRESHOLD = 80
+
+# ================= DB =================
+def get_conn():
+    return psycopg2.connect(**DB)
+
+# ================= SNAPSHOT =================
+def calculate_snapshot(asset):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT
+        i.servercores::NUMERIC,
+        i.servermemory::NUMERIC / 1024,
+        i.totaldisk::NUMERIC,
+        m.total_cpu,
+        m.total_ram_gb,
+        m.total_storage_gb,
+        COALESCE(SUM(CASE WHEN e.resource_type='cpu' THEN e.change_value END),0),
+        COALESCE(SUM(CASE WHEN e.resource_type='ram' THEN e.change_value END),0),
+        COALESCE(SUM(CASE WHEN e.resource_type='storage' THEN e.change_value END),0)
+    FROM inventory i
+    JOIN server_capacity_master m ON m.assetuniquename=i.assetuniquename
+    LEFT JOIN server_capacity_events e ON e.assetuniquename=i.assetuniquename
+    WHERE i.assetuniquename=%s
+    GROUP BY i.servercores,i.servermemory,i.totaldisk,
+             m.total_cpu,m.total_ram_gb,m.total_storage_gb
+    """,(asset,))
+
+    r = cur.fetchone()
+
+    cpu_used = r[0] + r[6]
+    ram_used = r[1] + r[7]
+    storage_used = r[2] + r[8]
+
+    usable_cpu = r[3] * 0.7
+    usable_ram = r[4] * 0.7
+    usable_storage = r[5] * 0.7
+
+    cur.execute("""
+    INSERT INTO server_capacity_snapshot
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+    ON CONFLICT (assetuniquename)
+    DO UPDATE SET
+        cpu_used=EXCLUDED.cpu_used,
+        ram_used_gb=EXCLUDED.ram_used_gb,
+        storage_used_gb=EXCLUDED.storage_used_gb,
+        usable_cpu=EXCLUDED.usable_cpu,
+        usable_ram_gb=EXCLUDED.usable_ram_gb,
+        usable_storage_gb=EXCLUDED.usable_storage_gb,
+        free_cpu=EXCLUDED.free_cpu,
+        free_ram_gb=EXCLUDED.free_ram_gb,
+        free_storage_gb=EXCLUDED.free_storage_gb,
+        calculated_at=NOW()
+    """,(
+        asset,
+        cpu_used, ram_used, storage_used,
+        usable_cpu, usable_ram, usable_storage,
+        usable_cpu-cpu_used,
+        usable_ram-ram_used,
+        usable_storage-storage_used
+    ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return cpu_used, ram_used, storage_used, usable_cpu, usable_ram, usable_storage
+
+# ================= DASH =================
+app = Dash(__name__)
+
+def servers():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT assetuniquename FROM server_capacity_master")
+    s = [i[0] for i in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return [{"label":x,"value":x} for x in s]
+
+app.layout = html.Div([
+    html.H2("Production Capacity Dashboard"),
+
+    dcc.Dropdown(id="server", options=servers(), placeholder="Select Server"),
+
+    dcc.RadioItems(
+        id="action",
+        options=[
+            {"label":"Allocate","value":"allocate"},
+            {"label":"Deallocate","value":"deallocate"}
+        ],
+        value="allocate"
+    ),
+
+    dcc.Input(id="storage", type="number", placeholder="Storage (GB)"),
+    dcc.Input(id="ram", type="number", placeholder="RAM (GB)"),
+    dcc.Input(id="cpu", type="number", placeholder="CPU (cores)"),
+
+    html.Button("Submit", id="submit"),
+    html.Div(id="status"),
+    html.Div(id="kpis"),
+    html.Div(id="alert")
+])
+
+@app.callback(
+    Output("status","children"),
+    Output("kpis","children"),
+    Output("alert","children"),
+    Input("submit","n_clicks"),
+    State("server","value"),
+    State("action","value"),
+    State("storage","value"),
+    State("ram","value"),
+    State("cpu","value")
+)
+def submit(n, server, action, s, r, c):
+    if not n or not server:
+        return "", "", ""
+
+    cpu_used, ram_used, storage_used, u_cpu, u_ram, u_storage = calculate_snapshot(server)
+
+    req = {
+        "storage": s or 0,
+        "ram": r or 0,
+        "cpu": c or 0
+    }
+
+    free = {
+        "storage": u_storage - storage_used,
+        "ram": u_ram - ram_used,
+        "cpu": u_cpu - cpu_used
+    }
+
+    for k in req:
+        if action=="allocate" and req[k] > free[k]:
+            return f"❌ Over-allocation {k}", "", ""
+
+        if action=="deallocate" and abs(req[k]) > (storage_used if k=="storage" else ram_used if k=="ram" else cpu_used):
+            return f"❌ Over-deallocation {k}", "", ""
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    for k,v in req.items():
+        if v:
+            val = abs(v)
+            if action=="deallocate":
+                val = -val
+            cur.execute("""
+                INSERT INTO server_capacity_events
+                (assetuniquename,resource_type,change_type,change_value,source)
+                VALUES (%s,%s,%s,%s,'DASH')
+            """,(server,k,action,val))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    cpu_used, ram_used, storage_used, u_cpu, u_ram, u_storage = calculate_snapshot(server)
+
+    alert = ""
+    if (storage_used/u_storage)*100 >= ALERT_THRESHOLD:
+        alert += "⚠️ Storage crossed 80% "
+    if (ram_used/u_ram)*100 >= ALERT_THRESHOLD:
+        alert += "⚠️ RAM crossed 80% "
+    if (cpu_used/u_cpu)*100 >= ALERT_THRESHOLD:
+        alert += "⚠️ CPU crossed 80% "
+
+    kpis = f"""
+    CPU: {cpu_used}/{u_cpu} |
+    RAM: {ram_used}/{u_ram} |
+    Storage: {storage_used}/{u_storage}
+    """
+
+    return "✅ Updated successfully", kpis, alert
+
+if __name__ == "__main__":
+    app.run_server(host="0.0.0.0", port=8050)
