@@ -1,127 +1,54 @@
-import psycopg2
 import pandas as pd
-import os
-import time
-from threading import Thread
+from sqlalchemy import create_engine
 from dash import Dash, html, dcc, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 
-# ================= CONFIG =================
-DB = dict(
-    host="10.7.32.181",
-    dbname="GlobalInventory",
-    user="postgres",
-    password="mc6Qld8x0910"
+# ================= DB =================
+ENGINE = create_engine(
+    "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory",
+    pool_pre_ping=True
 )
 
-RESERVED_PERCENT = 30
+RESERVED = 0.30
 ALERT_THRESHOLD = 75
 
-# CSV AUTO PICKUP
-CSV_AUTO_ENABLED = True
-CSV_WATCH_DIR = "csv_inbox"
-CSV_ARCHIVE_DIR = "csv_archive"
-CSV_POLL_SECONDS = 60
+# ================= HELPERS =================
+def get_servers():
+    return pd.read_sql(
+        "SELECT assetuniquename FROM server_capacity_master ORDER BY 1",
+        ENGINE
+    )["assetuniquename"].tolist()
 
-os.makedirs(CSV_WATCH_DIR, exist_ok=True)
-os.makedirs(CSV_ARCHIVE_DIR, exist_ok=True)
+def snapshot(server):
+    q = """
+    SELECT
+      COALESCE(NULLIF(i.servercores,''),'0')::NUMERIC
+        + COALESCE(SUM(CASE WHEN e.resource_type='cpu' THEN e.change_value END),0) AS cpu_used,
+      COALESCE(NULLIF(i.servermemory,''),'0')::NUMERIC/1024
+        + COALESCE(SUM(CASE WHEN e.resource_type='ram' THEN e.change_value END),0) AS ram_used,
+      COALESCE(NULLIF(i.totaldisk,''),'0')::NUMERIC
+        + COALESCE(SUM(CASE WHEN e.resource_type='storage' THEN e.change_value END),0) AS storage_used,
+      m.total_cpu, m.total_ram_gb, m.total_storage_gb
+    FROM inventory i
+    JOIN server_capacity_master m ON m.assetuniquename=i.assetuniquename
+    LEFT JOIN server_capacity_events e ON e.assetuniquename=i.assetuniquename
+    WHERE i.assetuniquename=%s
+    GROUP BY i.servercores,i.servermemory,i.totaldisk,
+             m.total_cpu,m.total_ram_gb,m.total_storage_gb
+    """
+    r = pd.read_sql(q, ENGINE, params=[server]).iloc[0]
 
-# ================= DB =================
-def get_conn():
-    return psycopg2.connect(**DB)
-
-# ================= SNAPSHOT =================
-def calculate_snapshot(asset):
-    with get_conn() as conn:
-        q = """
-        SELECT
-            COALESCE(NULLIF(i.servercores,''),'0')::NUMERIC,
-            COALESCE(NULLIF(i.servermemory,''),'0')::NUMERIC / 1024,
-            COALESCE(NULLIF(i.totaldisk,''),'0')::NUMERIC,
-            m.total_cpu, m.total_ram_gb, m.total_storage_gb,
-            COALESCE(SUM(CASE WHEN e.resource_type='cpu' THEN e.change_value END),0),
-            COALESCE(SUM(CASE WHEN e.resource_type='ram' THEN e.change_value END),0),
-            COALESCE(SUM(CASE WHEN e.resource_type='storage' THEN e.change_value END),0)
-        FROM inventory i
-        JOIN server_capacity_master m ON m.assetuniquename=i.assetuniquename
-        LEFT JOIN server_capacity_events e ON e.assetuniquename=i.assetuniquename
-        WHERE i.assetuniquename=%s
-        GROUP BY i.servercores,i.servermemory,i.totaldisk,
-                 m.total_cpu,m.total_ram_gb,m.total_storage_gb
-        """
-        cur = conn.cursor()
-        cur.execute(q, (asset,))
-        r = cur.fetchone()
-
-    return {
-        "cpu_used": float(r[0] + r[6]),
-        "ram_used": float(r[1] + r[7]),
-        "storage_used": float(r[2] + r[8]),
-        "usable_cpu": float(r[3] * 0.7),
-        "usable_ram": float(r[4] * 0.7),
-        "usable_storage": float(r[5] * 0.7)
+    usable = {
+        "cpu": r.total_cpu * (1-RESERVED),
+        "ram": r.total_ram_gb * (1-RESERVED),
+        "storage": r.total_storage_gb * (1-RESERVED)
     }
 
-# ================= TREND =================
-def get_trend(asset, resource):
-    with get_conn() as conn:
-        return pd.read_sql("""
-            SELECT DATE(created_at) d,
-                   SUM(change_value) v
-            FROM server_capacity_events
-            WHERE assetuniquename=%s AND resource_type=%s
-            GROUP BY DATE(created_at)
-            ORDER BY d
-        """, conn, params=(asset, resource))
-
-# ================= EVENTS =================
-def get_recent_events(asset):
-    with get_conn() as conn:
-        return pd.read_sql("""
-            SELECT assetuniquename, resource_type, change_type,
-                   change_value, source, created_at
-            FROM server_capacity_events
-            WHERE assetuniquename=%s
-            ORDER BY created_at DESC
-            LIMIT 10
-        """, conn, params=(asset,))
-
-# ================= CSV AUTO PICKUP =================
-def csv_watcher():
-    while True:
-        if CSV_AUTO_ENABLED:
-            for f in os.listdir(CSV_WATCH_DIR):
-                if f.endswith(".csv"):
-                    path = os.path.join(CSV_WATCH_DIR, f)
-                    df = pd.read_csv(path)
-
-                    with get_conn() as conn:
-                        cur = conn.cursor()
-                        for _, r in df.iterrows():
-                            val = abs(r["change_value"])
-                            if r["change_type"] == "deallocate":
-                                val = -val
-                            cur.execute("""
-                                INSERT INTO server_capacity_events
-                                (assetuniquename,resource_type,change_type,change_value,reason,source)
-                                VALUES (%s,%s,%s,%s,%s,'CSV_AUTO')
-                            """, (
-                                r["assetuniquename"],
-                                r["resource_type"],
-                                r["change_type"],
-                                val,
-                                r.get("reason","")
-                            ))
-                        conn.commit()
-
-                    os.rename(
-                        path,
-                        os.path.join(CSV_ARCHIVE_DIR, f)
-                    )
-        time.sleep(CSV_POLL_SECONDS)
-
-Thread(target=csv_watcher, daemon=True).start()
+    return {
+        "used": {"cpu":r.cpu_used,"ram":r.ram_used,"storage":r.storage_used},
+        "usable": usable
+    }
 
 # ================= DASH =================
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
@@ -132,74 +59,102 @@ def kpi(title, value, color):
         color=color, className="shadow-sm"
     )
 
-def servers():
-    with get_conn() as conn:
-        return pd.read_sql(
-            "SELECT assetuniquename FROM server_capacity_master",
-            conn
-        )["assetuniquename"].tolist()
-
+# ================= LAYOUT =================
 app.layout = dbc.Container(fluid=True, children=[
 
     html.H3("Server Capacity Dashboard", className="my-3"),
 
-    dcc.Dropdown(
-        id="server",
-        options=[{"label":s,"value":s} for s in servers()],
-        placeholder="Select Server"
-    ),
-
-    html.Br(),
-
-    dbc.Row([
-        dbc.Col(id="kpi-total", md=3),
-        dbc.Col(id="kpi-reserved", md=3),
-        dbc.Col(id="kpi-usable", md=3),
-        dbc.Col(id="kpi-used", md=3),
+    dcc.Tabs(id="tabs", value="capacity", children=[
+        dcc.Tab(label="Capacity Dashboard", value="capacity"),
+        dcc.Tab(label="Inventory", value="inventory")
     ]),
 
-    html.Hr(),
-
-    dbc.Row([
-        dbc.Col(
-            dbc.Card([
-                dbc.CardHeader("Allocate / Deallocate"),
-                dbc.CardBody([
-                    dcc.RadioItems(
-                        id="action",
-                        options=[
-                            {"label":"Allocate","value":"allocate"},
-                            {"label":"Deallocate","value":"deallocate"}
-                        ],
-                        value="allocate"
-                    ),
-                    dbc.Input(id="storage", type="number", placeholder="Storage (GB)"),
-                    dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
-                    dbc.Input(id="cpu", type="number", placeholder="CPU", className="mt-2"),
-                    dbc.Button("Submit", id="submit", color="primary", className="mt-3"),
-                    html.Div(id="status")
-                ])
-            ]),
-            md=3
-        ),
-        dbc.Col(
-            dbc.Card([
-                dbc.CardHeader("Storage Usage Trend"),
-                dbc.CardBody(dcc.Graph(id="trend"))
-            ]),
-            md=9
-        )
-    ]),
-
-    html.Hr(),
-
-    dbc.Card([
-        dbc.CardHeader("Recent Events"),
-        dbc.CardBody(html.Div(id="events"))
-    ])
+    html.Div(id="tab-content")
 ])
 
-# ================= CALLBACKS =================
+# ================= CAPACITY TAB =================
+def capacity_layout():
+    return html.Div([
+        dcc.Dropdown(
+            id="server",
+            options=[{"label":s,"value":s} for s in get_servers()],
+            placeholder="Select Server"
+        ),
+        html.Br(),
+
+        dbc.Row([
+            dbc.Col(id="kpi-total", md=3),
+            dbc.Col(id="kpi-reserved", md=3),
+            dbc.Col(id="kpi-usable", md=3),
+            dbc.Col(id="kpi-used", md=3),
+        ]),
+
+        html.Hr(),
+
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Allocate / Deallocate"),
+                    dbc.CardBody([
+                        dcc.RadioItems(
+                            id="action",
+                            options=[{"label":"Allocate","value":"allocate"},
+                                     {"label":"Deallocate","value":"deallocate"}],
+                            value="allocate"
+                        ),
+                        dbc.Input(id="storage", type="number", placeholder="Storage (GB)"),
+                        dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
+                        dbc.Input(id="cpu", type="number", placeholder="CPU", className="mt-2"),
+                        dbc.Button("Submit", id="submit", color="primary", className="mt-3"),
+                        html.Div(id="status")
+                    ])
+                ])
+            ], md=3),
+
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Storage Usage Trend"),
+                    dbc.CardBody(dcc.Graph(id="trend"))
+                ])
+            ], md=9)
+        ]),
+
+        html.Hr(),
+
+        dbc.Card([
+            dbc.CardHeader("Recent Allocation Events"),
+            dbc.CardBody(html.Div(id="events"))
+        ])
+    ])
+
+# ================= INVENTORY TAB =================
+def inventory_layout():
+    df = pd.read_sql("""
+        SELECT assetuniquename, assetipaddress, serveros,
+               servercores, servermemory, totaldisk
+        FROM inventory
+        ORDER BY assetuniquename
+        LIMIT 500
+    """, ENGINE)
+
+    return dbc.Card([
+        dbc.CardHeader("Inventory (Read-Only)"),
+        dbc.CardBody(
+            dbc.Table.from_dataframe(
+                df, striped=True, bordered=False, hover=True, responsive=True
+            )
+        )
+    ])
+
+# ================= TAB SWITCH =================
+@app.callback(
+    Output("tab-content","children"),
+    Input("tabs","value")
+)
+def switch(tab):
+    return capacity_layout() if tab=="capacity" else inventory_layout()
+
+# ================= CAPACITY CALLBACK =================
 @app.callback(
     Output("kpi-total","children"),
     Output("kpi-reserved","children"),
@@ -211,66 +166,44 @@ app.layout = dbc.Container(fluid=True, children=[
 )
 def refresh(server):
     if not server:
-        return "","","","",go.Figure(),""
+        return "","","","","", ""
 
-    snap = calculate_snapshot(server)
-    total = snap["usable_storage"] / 0.7
-    used = snap["storage_used"]
-    pct = (used / snap["usable_storage"]) * 100
+    s = snapshot(server)
+    total = s["usable"]["storage"] / (1-RESERVED)
+    used = s["used"]["storage"]
+    pct = (used / s["usable"]["storage"]) * 100
 
     color = "danger" if pct >= ALERT_THRESHOLD else "success"
 
-    df = get_trend(server, "storage")
+    trend = pd.read_sql("""
+        SELECT DATE(created_at) d, SUM(change_value) v
+        FROM server_capacity_events
+        WHERE assetuniquename=%s AND resource_type='storage'
+        GROUP BY DATE(created_at)
+        ORDER BY d
+    """, ENGINE, params=[server])
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["d"], y=df["v"].cumsum(), fill="tozeroy"))
-    fig.update_layout(height=300, margin=dict(l=20,r=20,t=20,b=20))
+    fig.add_trace(go.Scatter(
+        x=trend["d"], y=trend["v"].cumsum(), fill="tozeroy"
+    ))
 
-    events = get_recent_events(server)
-
-    table = dbc.Table.from_dataframe(
-        events,
-        striped=True,
-        bordered=False,
-        hover=True
-    )
+    events = pd.read_sql("""
+        SELECT resource_type, change_type, change_value, source, created_at
+        FROM server_capacity_events
+        WHERE assetuniquename=%s
+        ORDER BY created_at DESC
+        LIMIT 10
+    """, ENGINE, params=[server])
 
     return (
         kpi("Total Capacity", f"{total:.1f} GB", "primary"),
-        kpi("Reserved (30%)", f"{total*0.3:.1f} GB", "warning"),
-        kpi("Usable Capacity", f"{snap['usable_storage']:.1f} GB", "success"),
+        kpi("Reserved (30%)", f"{total*RESERVED:.1f} GB", "warning"),
+        kpi("Usable Capacity", f"{s['usable']['storage']:.1f} GB", "success"),
         kpi(f"Used ({pct:.1f}%)", f"{used:.1f} GB", color),
         fig,
-        table
+        dbc.Table.from_dataframe(events, striped=True, hover=True)
     )
-
-@app.callback(
-    Output("status","children"),
-    Input("submit","n_clicks"),
-    State("server","value"),
-    State("action","value"),
-    State("storage","value"),
-    State("ram","value"),
-    State("cpu","value")
-)
-def submit(n, server, action, s, r, c):
-    if not n or not server:
-        return ""
-
-    with get_conn() as conn:
-        cur = conn.cursor()
-        for res,val in {"storage":s,"ram":r,"cpu":c}.items():
-            if val:
-                v = abs(val)
-                if action=="deallocate":
-                    v = -v
-                cur.execute("""
-                    INSERT INTO server_capacity_events
-                    (assetuniquename,resource_type,change_type,change_value,source)
-                    VALUES (%s,%s,%s,%s,'DASH')
-                """,(server,res,action,v))
-        conn.commit()
-
-    return "✅ Updated"
 
 # ================= RUN =================
 if __name__ == "__main__":
