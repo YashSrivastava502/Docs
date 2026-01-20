@@ -1,1 +1,78 @@
+import psycopg2
 
+DB = dict(
+    host="10.7.32.181",
+    dbname="GlobalInventory",
+    user="postgres",
+    password="mc6Qld8x0910"
+)
+
+conn = psycopg2.connect(**DB)
+cur = conn.cursor()
+
+# -------- Capacity Master --------
+cur.execute("""
+CREATE TABLE IF NOT EXISTS server_capacity_master (
+    assetuniquename TEXT PRIMARY KEY,
+    total_cpu NUMERIC,
+    total_ram_gb NUMERIC,
+    total_storage_gb NUMERIC,
+    reserved_percent NUMERIC DEFAULT 30,
+    last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+# -------- Capacity Events --------
+cur.execute("""
+CREATE TABLE IF NOT EXISTS server_capacity_events (
+    id BIGSERIAL PRIMARY KEY,
+    assetuniquename TEXT NOT NULL,
+    resource_type TEXT CHECK (resource_type IN ('storage','ram','cpu')),
+    change_type TEXT CHECK (change_type IN ('allocate','deallocate')),
+    change_value NUMERIC NOT NULL,
+    reason TEXT,
+    source TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+# -------- Capacity Snapshot --------
+cur.execute("""
+CREATE TABLE IF NOT EXISTS server_capacity_snapshot (
+    assetuniquename TEXT PRIMARY KEY,
+    cpu_used NUMERIC,
+    ram_used_gb NUMERIC,
+    storage_used_gb NUMERIC,
+    usable_cpu NUMERIC,
+    usable_ram_gb NUMERIC,
+    usable_storage_gb NUMERIC,
+    free_cpu NUMERIC,
+    free_ram_gb NUMERIC,
+    free_storage_gb NUMERIC,
+    calculated_at TIMESTAMP
+);
+""")
+
+# -------- Sync Capacity Master from Inventory --------
+cur.execute("""
+INSERT INTO server_capacity_master
+(assetuniquename, total_cpu, total_ram_gb, total_storage_gb)
+SELECT
+    assetuniquename,
+    servercores::NUMERIC,
+    servermemory::NUMERIC / 1024,
+    totaldisk::NUMERIC
+FROM inventory
+ON CONFLICT (assetuniquename)
+DO UPDATE SET
+    total_cpu = EXCLUDED.total_cpu,
+    total_ram_gb = EXCLUDED.total_ram_gb,
+    total_storage_gb = EXCLUDED.total_storage_gb,
+    last_synced = CURRENT_TIMESTAMP;
+""")
+
+conn.commit()
+cur.close()
+conn.close()
+
+print("✅ Database setup & capacity master sync completed")
