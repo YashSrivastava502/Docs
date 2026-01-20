@@ -23,7 +23,8 @@ os.makedirs(CSV_INBOX, exist_ok=True)
 os.makedirs(CSV_ARCHIVE, exist_ok=True)
 
 # ================= HELPERS =================
-def safe(v): return float(v or 0)
+def safe(v):
+    return float(v) if v not in (None, "", " ") else 0.0
 
 def fmt_gb(v):
     return f"{v/1024:.1f} TB" if v >= 1024 else f"{v:.1f} GB"
@@ -41,13 +42,14 @@ def capacity_calc(used):
 
 # ================= DATA =================
 def global_capacity():
-    r = pd.read_sql("""
-        SELECT
-          SUM(COALESCE(NULLIF(servercores,''),'0')::NUMERIC) AS cpu,
-          SUM(COALESCE(NULLIF(servermemory,''),'0')::NUMERIC)/1024 AS ram,
-          SUM(COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC) AS storage
-        FROM inventory
-    """, ENGINE).iloc[0]
+    q = """
+    SELECT
+      SUM(COALESCE(NULLIF(servercores,''),'0')::NUMERIC)              AS cpu,
+      SUM(COALESCE(NULLIF(servermemory,''),'0')::NUMERIC)/1024        AS ram,
+      SUM(COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC)                AS storage
+    FROM inventory
+    """
+    r = pd.read_sql(q, ENGINE).iloc[0]
 
     return {
         "storage": capacity_calc(safe(r.storage)),
@@ -55,18 +57,14 @@ def global_capacity():
         "cpu": capacity_calc(safe(r.cpu))
     }
 
-def servers():
-    return pd.read_sql(
-        "SELECT assetuniquename FROM inventory ORDER BY 1",
-        ENGINE
-    )["assetuniquename"].tolist()
-
 def inventory_df():
     return pd.read_sql("""
-        SELECT assetuniquename, serveros,
-               servercores::NUMERIC AS cpu,
-               servermemory::NUMERIC/1024 AS ram_gb,
-               totaldisk::NUMERIC AS storage_gb
+        SELECT
+            assetuniquename,
+            serveros,
+            COALESCE(NULLIF(servercores,''),'0')::NUMERIC            AS cpu_cores,
+            COALESCE(NULLIF(servermemory,''),'0')::NUMERIC / 1024    AS ram_gb,
+            COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC              AS storage_gb
         FROM inventory
         ORDER BY assetuniquename
     """, ENGINE)
@@ -80,7 +78,7 @@ def events_df(resource=None, start=None, end=None):
     """
     params = {}
     if resource:
-        q += " AND resource_type=:r"
+        q += " AND resource_type = :r"
         params["r"] = resource
     if start and end:
         q += " AND DATE(created_at) BETWEEN :s AND :e"
@@ -93,24 +91,28 @@ def trend_df(resource):
     return pd.read_sql("""
         SELECT DATE(created_at) d, SUM(change_value) v
         FROM server_capacity_events
-        WHERE resource_type=%s
+        WHERE resource_type = %s
         GROUP BY DATE(created_at)
         ORDER BY d
     """, ENGINE, params=[resource])
 
-# ================= CSV BACKGROUND =================
+# ================= CSV BACKGROUND JOB =================
 def csv_watcher():
     while True:
         try:
             for f in os.listdir(CSV_INBOX):
                 if not f.endswith(".csv"):
                     continue
-                df = pd.read_csv(os.path.join(CSV_INBOX, f))
+
+                path = os.path.join(CSV_INBOX, f)
+                df = pd.read_csv(path)
+
                 with ENGINE.begin() as conn:
                     for _, r in df.iterrows():
                         val = abs(float(r["change_value"]))
-                        if r["change_type"].lower() == "deallocate":
+                        if str(r["change_type"]).lower() == "deallocate":
                             val = -val
+
                         conn.execute(text("""
                             INSERT INTO server_capacity_events
                             (assetuniquename, resource_type,
@@ -122,40 +124,46 @@ def csv_watcher():
                             t=r["change_type"],
                             v=val
                         ))
-                os.rename(
-                    os.path.join(CSV_INBOX, f),
-                    os.path.join(CSV_ARCHIVE, f)
-                )
+
+                os.rename(path, os.path.join(CSV_ARCHIVE, f))
+
         except Exception as e:
-            print("CSV watcher:", e)
+            print("CSV watcher error:", e)
+
         time.sleep(CSV_POLL_SEC)
 
 threading.Thread(target=csv_watcher, daemon=True).start()
 
 # ================= DASH =================
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-app.title = "Capacity Portal"
+app.title = "Server Capacity Portal"
 
-def kpi(title, d, unit):
-    used_txt = f"{d['used']:.0f} cores" if unit=="CPU" else fmt_gb(d["used"])
+def kpi_card(title, d, unit):
+    used_txt = f"{d['used']:.0f} cores" if unit == "CPU" else fmt_gb(d["used"])
+    total_txt = f"{d['total']:.0f} cores" if unit == "CPU" else fmt_gb(d["total"])
+    usable_txt = f"{d['usable']:.0f} cores" if unit == "CPU" else fmt_gb(d["usable"])
+    reserved_txt = f"{d['reserved']:.0f} cores" if unit == "CPU" else fmt_gb(d["reserved"])
+
     color = "danger" if d["pct"] >= 75 else "success"
+
     return dbc.Card([
         dbc.CardHeader(title),
         dbc.CardBody([
-            html.P(f"Total: {fmt_gb(d['total']) if unit!='CPU' else f'{d['total']:.0f} cores'}"),
-            html.P(f"Reserved: {fmt_gb(d['reserved']) if unit!='CPU' else f'{d['reserved']:.0f} cores'}"),
-            html.P(f"Usable: {fmt_gb(d['usable']) if unit!='CPU' else f'{d['usable']:.0f} cores'}"),
+            html.P(f"Total: {total_txt}"),
+            html.P(f"Reserved (30%): {reserved_txt}"),
+            html.P(f"Usable: {usable_txt}"),
             html.H5(f"Used: {used_txt} ({d['pct']:.0f}%)", className=f"text-{color}")
         ])
     ], className="shadow-sm")
 
 # ================= LAYOUT =================
 app.layout = dbc.Container(fluid=True, children=[
+
     html.H3("Server Capacity Portal", className="my-3"),
 
     dcc.Tabs(children=[
 
-        # -------- DASHBOARD --------
+        # ---------- DASHBOARD ----------
         dcc.Tab(label="Dashboard", children=[
             dbc.Row(id="kpis", className="mb-4"),
 
@@ -169,7 +177,7 @@ app.layout = dbc.Container(fluid=True, children=[
                                 options=[
                                     {"label":"Storage","value":"storage"},
                                     {"label":"RAM","value":"ram"},
-                                    {"label":"CPU","value":"cpu"},
+                                    {"label":"CPU","value":"cpu"}
                                 ],
                                 value="storage",
                                 style={"width":"200px"}
@@ -179,6 +187,7 @@ app.layout = dbc.Container(fluid=True, children=[
                     ]),
                     md=7
                 ),
+
                 dbc.Col(
                     dbc.Card([
                         dbc.CardHeader("Events"),
@@ -196,7 +205,7 @@ app.layout = dbc.Container(fluid=True, children=[
             ])
         ]),
 
-        # -------- INVENTORY --------
+        # ---------- INVENTORY ----------
         dcc.Tab(label="Inventory", children=[
             dbc.Card([
                 dbc.CardHeader("Inventory"),
@@ -204,29 +213,9 @@ app.layout = dbc.Container(fluid=True, children=[
                     dbc.Table.from_dataframe(
                         inventory_df(),
                         striped=True,
-                        hover=True
+                        hover=True,
+                        bordered=False
                     )
-                )
-            ])
-        ]),
-
-        # -------- ACTIONS --------
-        dcc.Tab(label="Server Actions", children=[
-            dbc.Row([
-                dbc.Col(
-                    dbc.Card([
-                        dbc.CardHeader("Add Server"),
-                        dbc.CardBody([
-                            dbc.Input(id="new-name", placeholder="Server Name"),
-                            dbc.Input(id="new-cpu", type="number", placeholder="CPU Cores", className="mt-2"),
-                            dbc.Input(id="new-ram", type="number", placeholder="RAM (GB)", className="mt-2"),
-                            dbc.Input(id="new-storage", type="number", placeholder="Storage (GB)", className="mt-2"),
-                            dbc.Input(id="new-os", placeholder="OS", className="mt-2"),
-                            dbc.Button("Add Server", className="mt-3 w-100", color="primary"),
-                            html.Div(id="add-status", className="mt-2")
-                        ])
-                    ]),
-                    md=4
                 )
             ])
         ])
@@ -235,21 +224,31 @@ app.layout = dbc.Container(fluid=True, children=[
 ])
 
 # ================= CALLBACKS =================
-@app.callback(Output("kpis","children"), Input("trend-resource","value"))
+@app.callback(
+    Output("kpis","children"),
+    Input("trend-resource","value")
+)
 def update_kpis(_):
     cap = global_capacity()
     return [
-        dbc.Col(kpi("STORAGE", cap["storage"], "GB"), md=4),
-        dbc.Col(kpi("RAM", cap["ram"], "GB"), md=4),
-        dbc.Col(kpi("CPU", cap["cpu"], "CPU"), md=4),
+        dbc.Col(kpi_card("STORAGE", cap["storage"], "GB"), md=4),
+        dbc.Col(kpi_card("RAM", cap["ram"], "GB"), md=4),
+        dbc.Col(kpi_card("CPU", cap["cpu"], "CPU"), md=4),
     ]
 
-@app.callback(Output("trend","figure"), Input("trend-resource","value"))
+@app.callback(
+    Output("trend","figure"),
+    Input("trend-resource","value")
+)
 def update_trend(res):
     df = trend_df(res)
     fig = go.Figure()
     if not df.empty:
-        fig.add_trace(go.Scatter(x=df["d"], y=df["v"].cumsum(), fill="tozeroy"))
+        fig.add_trace(go.Scatter(
+            x=df["d"],
+            y=df["v"].cumsum(),
+            fill="tozeroy"
+        ))
     fig.update_layout(height=300)
     return fig
 
@@ -265,4 +264,4 @@ def update_events(start, end, res):
 
 # ================= RUN =================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=8050, debug=True)
