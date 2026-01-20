@@ -1,158 +1,168 @@
 import pandas as pd
 from sqlalchemy import create_engine
-from dash import Dash, html, dcc, Input, Output, State
+from dash import Dash, html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 
-# ================= DB =================
+# ================= DB ENGINE =================
 ENGINE = create_engine(
     "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory",
     pool_pre_ping=True
 )
 
-RESERVED = 0.30
-ALERT_THRESHOLD = 75
+# ================= DASH APP =================
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.title = "Server Capacity Dashboard"
 
-# ================= HELPERS =================
-def get_servers():
-    return pd.read_sql(
-        "SELECT assetuniquename FROM server_capacity_master ORDER BY 1",
-        ENGINE
-    )["assetuniquename"].tolist()
+# ================= DATA LOAD (SAFE) =================
+def load_servers():
+    try:
+        df = pd.read_sql(
+            "SELECT assetuniquename FROM inventory ORDER BY 1",
+            ENGINE
+        )
+        return df["assetuniquename"].tolist()
+    except Exception:
+        return []
 
-def snapshot(server):
-    q = """
-    SELECT
-      COALESCE(NULLIF(i.servercores,''),'0')::NUMERIC
-        + COALESCE(SUM(CASE WHEN e.resource_type='cpu' THEN e.change_value END),0) AS cpu_used,
-      COALESCE(NULLIF(i.servermemory,''),'0')::NUMERIC/1024
-        + COALESCE(SUM(CASE WHEN e.resource_type='ram' THEN e.change_value END),0) AS ram_used,
-      COALESCE(NULLIF(i.totaldisk,''),'0')::NUMERIC
-        + COALESCE(SUM(CASE WHEN e.resource_type='storage' THEN e.change_value END),0) AS storage_used,
-      m.total_cpu, m.total_ram_gb, m.total_storage_gb
-    FROM inventory i
-    JOIN server_capacity_master m ON m.assetuniquename=i.assetuniquename
-    LEFT JOIN server_capacity_events e ON e.assetuniquename=i.assetuniquename
-    WHERE i.assetuniquename=%s
-    GROUP BY i.servercores,i.servermemory,i.totaldisk,
-             m.total_cpu,m.total_ram_gb,m.total_storage_gb
-    """
-    r = pd.read_sql(q, ENGINE, params=[server]).iloc[0]
+def load_inventory():
+    try:
+        return pd.read_sql("""
+            SELECT assetuniquename, serveros,
+                   servercores, servermemory, totaldisk
+            FROM inventory
+            ORDER BY assetuniquename
+            LIMIT 200
+        """, ENGINE)
+    except Exception:
+        return pd.DataFrame()
 
-    usable = {
-        "cpu": r.total_cpu * (1-RESERVED),
-        "ram": r.total_ram_gb * (1-RESERVED),
-        "storage": r.total_storage_gb * (1-RESERVED)
-    }
-
-    return {
-        "used": {"cpu":r.cpu_used,"ram":r.ram_used,"storage":r.storage_used},
-        "usable": usable
-    }
-
-# ================= DASH =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-
-def kpi(title, value, color):
-    return dbc.Card(
-        dbc.CardBody([html.H6(title), html.H2(value)]),
-        color=color, className="shadow-sm"
-    )
+def load_events(server):
+    try:
+        return pd.read_sql("""
+            SELECT resource_type, change_type,
+                   change_value, created_at
+            FROM server_capacity_events
+            WHERE assetuniquename = %s
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, ENGINE, params=[server])
+    except Exception:
+        return pd.DataFrame()
 
 # ================= LAYOUT =================
+servers = load_servers()
+
 app.layout = dbc.Container(fluid=True, children=[
 
-    html.H3("Server Capacity Dashboard", className="my-3"),
+    html.H2("Server Capacity Dashboard", className="my-3"),
 
     dcc.Tabs(id="tabs", value="capacity", children=[
+
         dcc.Tab(label="Capacity Dashboard", value="capacity"),
         dcc.Tab(label="Inventory", value="inventory")
+
     ]),
 
-    html.Div(id="tab-content")
-])
+    # ================= CAPACITY TAB =================
+    html.Div(id="capacity-tab", children=[
 
-# ================= CAPACITY TAB =================
-def capacity_layout():
-    return html.Div([
         dcc.Dropdown(
             id="server",
-            options=[{"label":s,"value":s} for s in get_servers()],
-            placeholder="Select Server"
+            options=[{"label":s, "value":s} for s in servers],
+            placeholder="Select Server",
+            className="mb-3"
         ),
-        html.Br(),
 
         dbc.Row([
-            dbc.Col(id="kpi-total", md=3),
-            dbc.Col(id="kpi-reserved", md=3),
-            dbc.Col(id="kpi-usable", md=3),
-            dbc.Col(id="kpi-used", md=3),
-        ]),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.H6("Total Capacity"),
+                html.H4(id="kpi-total")
+            ]), className="shadow-sm"), md=3),
 
-        html.Hr(),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.H6("Reserved (30%)"),
+                html.H4(id="kpi-reserved")
+            ]), className="shadow-sm"), md=3),
+
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.H6("Usable Capacity"),
+                html.H4(id="kpi-usable")
+            ]), className="shadow-sm"), md=3),
+
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.H6("Currently Used"),
+                html.H4(id="kpi-used")
+            ]), className="shadow-sm"), md=3),
+        ], className="mb-4"),
 
         dbc.Row([
-            dbc.Col([
+            dbc.Col(
                 dbc.Card([
                     dbc.CardHeader("Allocate / Deallocate"),
                     dbc.CardBody([
                         dcc.RadioItems(
                             id="action",
-                            options=[{"label":"Allocate","value":"allocate"},
-                                     {"label":"Deallocate","value":"deallocate"}],
+                            options=[
+                                {"label":"Allocate","value":"allocate"},
+                                {"label":"Deallocate","value":"deallocate"}
+                            ],
                             value="allocate"
                         ),
-                        dbc.Input(id="storage", type="number", placeholder="Storage (GB)"),
+                        dbc.Input(id="storage", type="number", placeholder="Storage (GB)", className="mt-2"),
                         dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
-                        dbc.Input(id="cpu", type="number", placeholder="CPU", className="mt-2"),
+                        dbc.Input(id="cpu", type="number", placeholder="CPU (cores)", className="mt-2"),
                         dbc.Button("Submit", id="submit", color="primary", className="mt-3"),
-                        html.Div(id="status")
+                        html.Div(id="status", className="mt-2")
                     ])
-                ])
-            ], md=3),
+                ], className="shadow-sm"),
+                md=3
+            ),
 
-            dbc.Col([
+            dbc.Col(
                 dbc.Card([
-                    dbc.CardHeader("Storage Usage Trend"),
+                    dbc.CardHeader("Capacity Usage Trend"),
                     dbc.CardBody(dcc.Graph(id="trend"))
-                ])
-            ], md=9)
-        ]),
-
-        html.Hr(),
+                ], className="shadow-sm"),
+                md=9
+            )
+        ], className="mb-4"),
 
         dbc.Card([
             dbc.CardHeader("Recent Allocation Events"),
             dbc.CardBody(html.Div(id="events"))
-        ])
-    ])
+        ], className="shadow-sm")
 
-# ================= INVENTORY TAB =================
-def inventory_layout():
-    df = pd.read_sql("""
-        SELECT assetuniquename, assetipaddress, serveros,
-               servercores, servermemory, totaldisk
-        FROM inventory
-        ORDER BY assetuniquename
-        LIMIT 500
-    """, ENGINE)
+    ]),
 
-    return dbc.Card([
-        dbc.CardHeader("Inventory (Read-Only)"),
-        dbc.CardBody(
-            dbc.Table.from_dataframe(
-                df, striped=True, bordered=False, hover=True, responsive=True
+    # ================= INVENTORY TAB =================
+    html.Div(id="inventory-tab", style={"display":"none"}, children=[
+        dbc.Card([
+            dbc.CardHeader("Inventory (Read Only)"),
+            dbc.CardBody(
+                dbc.Table.from_dataframe(
+                    load_inventory(),
+                    striped=True,
+                    bordered=False,
+                    hover=True,
+                    responsive=True
+                )
             )
-        )
+        ], className="shadow-sm")
     ])
+
+])
 
 # ================= TAB SWITCH =================
 @app.callback(
-    Output("tab-content","children"),
+    Output("capacity-tab","style"),
+    Output("inventory-tab","style"),
     Input("tabs","value")
 )
-def switch(tab):
-    return capacity_layout() if tab=="capacity" else inventory_layout()
+def switch_tab(tab):
+    if tab == "capacity":
+        return {"display":"block"}, {"display":"none"}
+    return {"display":"none"}, {"display":"block"}
 
 # ================= CAPACITY CALLBACK =================
 @app.callback(
@@ -164,45 +174,47 @@ def switch(tab):
     Output("events","children"),
     Input("server","value")
 )
-def refresh(server):
+def update_dashboard(server):
     if not server:
-        return "","","","","", ""
+        empty_fig = go.Figure()
+        empty_fig.update_layout(height=300)
+        return "-", "-", "-", "-", empty_fig, ""
 
-    s = snapshot(server)
-    total = s["usable"]["storage"] / (1-RESERVED)
-    used = s["used"]["storage"]
-    pct = (used / s["usable"]["storage"]) * 100
-
-    color = "danger" if pct >= ALERT_THRESHOLD else "success"
-
-    trend = pd.read_sql("""
-        SELECT DATE(created_at) d, SUM(change_value) v
-        FROM server_capacity_events
-        WHERE assetuniquename=%s AND resource_type='storage'
-        GROUP BY DATE(created_at)
-        ORDER BY d
-    """, ENGINE, params=[server])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=trend["d"], y=trend["v"].cumsum(), fill="tozeroy"
-    ))
-
-    events = pd.read_sql("""
-        SELECT resource_type, change_type, change_value, source, created_at
-        FROM server_capacity_events
+    # SAFE inventory read
+    df = pd.read_sql("""
+        SELECT COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC AS used
+        FROM inventory
         WHERE assetuniquename=%s
-        ORDER BY created_at DESC
-        LIMIT 10
     """, ENGINE, params=[server])
+
+    used = float(df.iloc[0]["used"])
+    total = used / 0.7 if used else 0
+    reserved = total * 0.3
+    usable = total * 0.7
+
+    # Trend (safe)
+    events = load_events(server)
+    fig = go.Figure()
+    if not events.empty:
+        fig.add_trace(go.Scatter(
+            x=events["created_at"],
+            y=events["change_value"].cumsum(),
+            fill="tozeroy"
+        ))
+    fig.update_layout(height=300, margin=dict(l=20,r=20,t=20,b=20))
+
+    table = (
+        dbc.Table.from_dataframe(events, striped=True, hover=True)
+        if not events.empty else "No events"
+    )
 
     return (
-        kpi("Total Capacity", f"{total:.1f} GB", "primary"),
-        kpi("Reserved (30%)", f"{total*RESERVED:.1f} GB", "warning"),
-        kpi("Usable Capacity", f"{s['usable']['storage']:.1f} GB", "success"),
-        kpi(f"Used ({pct:.1f}%)", f"{used:.1f} GB", color),
+        f"{total:.1f} GB",
+        f"{reserved:.1f} GB",
+        f"{usable:.1f} GB",
+        f"{used:.1f} GB",
         fig,
-        dbc.Table.from_dataframe(events, striped=True, hover=True)
+        table
     )
 
 # ================= RUN =================
