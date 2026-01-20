@@ -1,182 +1,237 @@
+import os
+import time
+import threading
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from dash import Dash, html, dcc, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 
-# ================= DB =================
+# ================= CONFIG =================
 ENGINE = create_engine(
     "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory",
     pool_pre_ping=True
 )
 
 RESERVED = 0.30
+ALERT_THRESHOLD = 0.75
 
-# ================= DATA HELPERS =================
-def get_global_capacity():
+CSV_INBOX = "csv_inbox"
+CSV_ARCHIVE = "csv_archive"
+CSV_POLL_SECONDS = 60
+
+os.makedirs(CSV_INBOX, exist_ok=True)
+os.makedirs(CSV_ARCHIVE, exist_ok=True)
+
+# ================= UTIL =================
+def fmt_gb(v):
+    return f"{v/1024:.1f} TB" if v >= 1024 else f"{v:.1f} GB"
+
+def pct(used, usable):
+    return (used / usable) if usable else 0
+
+# ================= DATA =================
+def global_usage():
     q = """
     SELECT
-        SUM(COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC) AS used
+      SUM(COALESCE(NULLIF(servercores,''),'0')::NUMERIC)            AS cpu,
+      SUM(COALESCE(NULLIF(servermemory,''),'0')::NUMERIC)/1024      AS ram,
+      SUM(COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC)              AS storage
     FROM inventory
     """
-    df = pd.read_sql(q, ENGINE)
-    used = float(df.iloc[0]["used"] or 0)
-    total = used / (1 - RESERVED) if used else 0
+    r = pd.read_sql(q, ENGINE).iloc[0]
+
+    def calc(used):
+        total = used / (1 - RESERVED) if used else 0
+        return dict(
+            used=used,
+            total=total,
+            reserved=total * RESERVED,
+            usable=total * (1 - RESERVED)
+        )
+
     return {
-        "total": total,
-        "reserved": total * RESERVED,
-        "usable": total * (1 - RESERVED),
-        "used": used
+        "storage": calc(float(r.storage or 0)),
+        "ram": calc(float(r.ram or 0)),
+        "cpu": calc(float(r.cpu or 0))
     }
 
-def get_servers():
+def servers():
     return pd.read_sql(
         "SELECT assetuniquename FROM inventory ORDER BY 1",
         ENGINE
     )["assetuniquename"].tolist()
 
-def get_recent_events():
+def recent_events():
     return pd.read_sql("""
         SELECT assetuniquename, resource_type,
-               change_type, change_value, created_at
+               change_type, change_value, source, created_at
         FROM server_capacity_events
         ORDER BY created_at DESC
         LIMIT 10
     """, ENGINE)
 
-def get_trend():
+def trend(resource):
     df = pd.read_sql("""
         SELECT DATE(created_at) d,
                SUM(change_value) v
         FROM server_capacity_events
+        WHERE resource_type = %s
         GROUP BY DATE(created_at)
         ORDER BY d
-    """, ENGINE)
-
-    if df.empty:
-        return go.Figure()
+    """, ENGINE, params=[resource])
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["d"],
-        y=df["v"].cumsum(),
-        fill="tozeroy",
-        name="Used"
-    ))
-    fig.update_layout(
-        height=320,
-        margin=dict(l=20,r=20,t=20,b=20)
-    )
+    if not df.empty:
+        fig.add_trace(go.Scatter(
+            x=df["d"],
+            y=df["v"].cumsum(),
+            fill="tozeroy"
+        ))
+    fig.update_layout(height=320, margin=dict(l=20,r=20,t=20,b=20))
     return fig
 
-# ================= APP =================
+# ================= CSV BACKGROUND JOB =================
+def csv_watcher():
+    while True:
+        try:
+            for f in os.listdir(CSV_INBOX):
+                if not f.endswith(".csv"):
+                    continue
+
+                path = os.path.join(CSV_INBOX, f)
+                df = pd.read_csv(path)
+
+                with ENGINE.begin() as conn:
+                    for _, r in df.iterrows():
+                        val = abs(float(r["change_value"]))
+                        if r["change_type"].lower() == "deallocate":
+                            val = -val
+
+                        conn.execute(text("""
+                            INSERT INTO server_capacity_events
+                            (assetuniquename, resource_type,
+                             change_type, change_value, reason, source)
+                            VALUES (:a,:r,:t,:v,:rs,'CSV_AUTO')
+                        """), dict(
+                            a=r["assetuniquename"],
+                            r=r["resource_type"],
+                            t=r["change_type"],
+                            v=val,
+                            rs=r.get("reason","")
+                        ))
+
+                os.rename(path, os.path.join(CSV_ARCHIVE, f))
+
+        except Exception as e:
+            print("CSV watcher error:", e)
+
+        time.sleep(CSV_POLL_SECONDS)
+
+threading.Thread(target=csv_watcher, daemon=True).start()
+
+# ================= DASH =================
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 app.title = "Server Capacity Dashboard"
 
-servers = get_servers()
+def kpi_card(title, data, unit):
+    usage = pct(data["used"], data["usable"])
+    color = "danger" if usage >= ALERT_THRESHOLD else "success"
+
+    val = (
+        fmt_gb(data["used"]) if unit != "CPU"
+        else f"{data['used']:.0f} cores"
+    )
+
+    return dbc.Card([
+        dbc.CardHeader(title),
+        dbc.CardBody([
+            html.P(f"Total: {fmt_gb(data['total']) if unit!='CPU' else f'{data['total']:.0f} cores'}"),
+            html.P(f"Reserved: {fmt_gb(data['reserved']) if unit!='CPU' else f'{data['reserved']:.0f} cores'}"),
+            html.P(f"Usable: {fmt_gb(data['usable']) if unit!='CPU' else f'{data['usable']:.0f} cores'}"),
+            html.H5(f"Used: {val} ({usage*100:.0f}%)", className=f"text-{color}")
+        ])
+    ], className="shadow-sm")
 
 # ================= LAYOUT =================
 app.layout = dbc.Container(fluid=True, children=[
 
     html.H3("Server Capacity Dashboard", className="my-3"),
 
-    # ===== KPI ROW (GLOBAL) =====
-    dbc.Row(id="kpi-row", className="mb-4"),
+    dcc.Dropdown(
+        id="resource",
+        options=[
+            {"label":"Storage","value":"storage"},
+            {"label":"RAM","value":"ram"},
+            {"label":"CPU","value":"cpu"}
+        ],
+        value="storage",
+        style={"width":"200px"}
+    ),
 
-    # ===== MAIN CONTENT =====
+    dbc.Row(id="kpis", className="mb-4"),
+
     dbc.Row([
-
-        # LEFT ACTION PANEL
         dbc.Col(
             dbc.Card([
                 dbc.CardHeader("Allocate / Deallocate"),
                 dbc.CardBody([
-                    dbc.Label("Server"),
                     dcc.Dropdown(
                         id="server",
-                        options=[{"label":s,"value":s} for s in servers],
+                        options=[{"label":s,"value":s} for s in servers()],
                         placeholder="Select Server"
                     ),
-
-                    dbc.RadioItems(
+                    dcc.RadioItems(
                         id="action",
                         options=[
                             {"label":"Allocate","value":"allocate"},
                             {"label":"Deallocate","value":"deallocate"}
                         ],
                         value="allocate",
-                        className="mt-3"
+                        className="mt-2"
                     ),
-
                     dbc.Input(id="storage", type="number", placeholder="Storage (GB)", className="mt-2"),
                     dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
                     dbc.Input(id="cpu", type="number", placeholder="CPU (cores)", className="mt-2"),
-
-                    dbc.Button("Submit", color="primary", className="mt-3", block=True),
+                    dbc.Button("Submit", className="mt-3 w-100", color="primary"),
                     html.Div(id="status", className="mt-2")
                 ])
-            ], className="shadow-sm"),
+            ]),
             md=3
         ),
 
-        # RIGHT TREND GRAPH
         dbc.Col(
             dbc.Card([
-                dbc.CardHeader("Capacity Usage Trend (Last 30 Days)"),
+                dbc.CardHeader("Capacity Trend"),
                 dbc.CardBody(dcc.Graph(id="trend"))
-            ], className="shadow-sm"),
+            ]),
             md=9
         )
-
     ], className="mb-4"),
 
-    # ===== RECENT EVENTS =====
     dbc.Card([
         dbc.CardHeader("Recent Allocation Events"),
         dbc.CardBody(html.Div(id="events"))
-    ], className="shadow-sm")
-
+    ])
 ])
 
-# ================= CALLBACKS =================
+# ================= CALLBACK =================
 @app.callback(
-    Output("kpi-row","children"),
+    Output("kpis","children"),
     Output("trend","figure"),
     Output("events","children"),
-    Input("status","children")  # refresh trigger
+    Input("resource","value"),
+    Input("status","children")
 )
-def refresh_dashboard(_):
-    cap = get_global_capacity()
-
-    kpis = [
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Total Capacity"),
-            html.H2(f"{cap['total']:.1f} GB")
-        ]), className="shadow-sm"), md=3),
-
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Reserved (30%)"),
-            html.H2(f"{cap['reserved']:.1f} GB")
-        ]), className="shadow-sm"), md=3),
-
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Usable Capacity"),
-            html.H2(f"{cap['usable']:.1f} GB")
-        ]), className="shadow-sm"), md=3),
-
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Currently Used"),
-            html.H2(f"{cap['used']:.1f} GB")
-        ]), className="shadow-sm"), md=3),
+def refresh(resource, _):
+    cap = global_usage()
+    cards = [
+        dbc.Col(kpi_card("STORAGE", cap["storage"], "GB"), md=4),
+        dbc.Col(kpi_card("RAM", cap["ram"], "GB"), md=4),
+        dbc.Col(kpi_card("CPU", cap["cpu"], "CPU"), md=4)
     ]
-
-    events = get_recent_events()
-    table = (
-        dbc.Table.from_dataframe(events, striped=True, hover=True)
-        if not events.empty else "No recent events"
-    )
-
-    return kpis, get_trend(), table
+    ev = recent_events()
+    return cards, trend(resource), dbc.Table.from_dataframe(ev, striped=True, hover=True)
 
 # ================= RUN =================
 if __name__ == "__main__":
