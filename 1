@@ -1,221 +1,182 @@
 import pandas as pd
 from sqlalchemy import create_engine
-from dash import Dash, html, dcc, Input, Output
+from dash import Dash, html, dcc, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 
-# ================= DB ENGINE =================
+# ================= DB =================
 ENGINE = create_engine(
     "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory",
     pool_pre_ping=True
 )
 
-# ================= DASH APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+RESERVED = 0.30
+
+# ================= DATA HELPERS =================
+def get_global_capacity():
+    q = """
+    SELECT
+        SUM(COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC) AS used
+    FROM inventory
+    """
+    df = pd.read_sql(q, ENGINE)
+    used = float(df.iloc[0]["used"] or 0)
+    total = used / (1 - RESERVED) if used else 0
+    return {
+        "total": total,
+        "reserved": total * RESERVED,
+        "usable": total * (1 - RESERVED),
+        "used": used
+    }
+
+def get_servers():
+    return pd.read_sql(
+        "SELECT assetuniquename FROM inventory ORDER BY 1",
+        ENGINE
+    )["assetuniquename"].tolist()
+
+def get_recent_events():
+    return pd.read_sql("""
+        SELECT assetuniquename, resource_type,
+               change_type, change_value, created_at
+        FROM server_capacity_events
+        ORDER BY created_at DESC
+        LIMIT 10
+    """, ENGINE)
+
+def get_trend():
+    df = pd.read_sql("""
+        SELECT DATE(created_at) d,
+               SUM(change_value) v
+        FROM server_capacity_events
+        GROUP BY DATE(created_at)
+        ORDER BY d
+    """, ENGINE)
+
+    if df.empty:
+        return go.Figure()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["d"],
+        y=df["v"].cumsum(),
+        fill="tozeroy",
+        name="Used"
+    ))
+    fig.update_layout(
+        height=320,
+        margin=dict(l=20,r=20,t=20,b=20)
+    )
+    return fig
+
+# ================= APP =================
+app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 app.title = "Server Capacity Dashboard"
 
-# ================= DATA LOAD (SAFE) =================
-def load_servers():
-    try:
-        df = pd.read_sql(
-            "SELECT assetuniquename FROM inventory ORDER BY 1",
-            ENGINE
-        )
-        return df["assetuniquename"].tolist()
-    except Exception:
-        return []
-
-def load_inventory():
-    try:
-        return pd.read_sql("""
-            SELECT assetuniquename, serveros,
-                   servercores, servermemory, totaldisk
-            FROM inventory
-            ORDER BY assetuniquename
-            LIMIT 200
-        """, ENGINE)
-    except Exception:
-        return pd.DataFrame()
-
-def load_events(server):
-    try:
-        return pd.read_sql("""
-            SELECT resource_type, change_type,
-                   change_value, created_at
-            FROM server_capacity_events
-            WHERE assetuniquename = %s
-            ORDER BY created_at DESC
-            LIMIT 10
-        """, ENGINE, params=[server])
-    except Exception:
-        return pd.DataFrame()
+servers = get_servers()
 
 # ================= LAYOUT =================
-servers = load_servers()
-
 app.layout = dbc.Container(fluid=True, children=[
 
-    html.H2("Server Capacity Dashboard", className="my-3"),
+    html.H3("Server Capacity Dashboard", className="my-3"),
 
-    dcc.Tabs(id="tabs", value="capacity", children=[
+    # ===== KPI ROW (GLOBAL) =====
+    dbc.Row(id="kpi-row", className="mb-4"),
 
-        dcc.Tab(label="Capacity Dashboard", value="capacity"),
-        dcc.Tab(label="Inventory", value="inventory")
+    # ===== MAIN CONTENT =====
+    dbc.Row([
 
-    ]),
+        # LEFT ACTION PANEL
+        dbc.Col(
+            dbc.Card([
+                dbc.CardHeader("Allocate / Deallocate"),
+                dbc.CardBody([
+                    dbc.Label("Server"),
+                    dcc.Dropdown(
+                        id="server",
+                        options=[{"label":s,"value":s} for s in servers],
+                        placeholder="Select Server"
+                    ),
 
-    # ================= CAPACITY TAB =================
-    html.Div(id="capacity-tab", children=[
+                    dbc.RadioItems(
+                        id="action",
+                        options=[
+                            {"label":"Allocate","value":"allocate"},
+                            {"label":"Deallocate","value":"deallocate"}
+                        ],
+                        value="allocate",
+                        className="mt-3"
+                    ),
 
-        dcc.Dropdown(
-            id="server",
-            options=[{"label":s, "value":s} for s in servers],
-            placeholder="Select Server",
-            className="mb-3"
+                    dbc.Input(id="storage", type="number", placeholder="Storage (GB)", className="mt-2"),
+                    dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
+                    dbc.Input(id="cpu", type="number", placeholder="CPU (cores)", className="mt-2"),
+
+                    dbc.Button("Submit", color="primary", className="mt-3", block=True),
+                    html.Div(id="status", className="mt-2")
+                ])
+            ], className="shadow-sm"),
+            md=3
         ),
 
-        dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Total Capacity"),
-                html.H4(id="kpi-total")
-            ]), className="shadow-sm"), md=3),
+        # RIGHT TREND GRAPH
+        dbc.Col(
+            dbc.Card([
+                dbc.CardHeader("Capacity Usage Trend (Last 30 Days)"),
+                dbc.CardBody(dcc.Graph(id="trend"))
+            ], className="shadow-sm"),
+            md=9
+        )
 
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Reserved (30%)"),
-                html.H4(id="kpi-reserved")
-            ]), className="shadow-sm"), md=3),
+    ], className="mb-4"),
 
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Usable Capacity"),
-                html.H4(id="kpi-usable")
-            ]), className="shadow-sm"), md=3),
-
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Currently Used"),
-                html.H4(id="kpi-used")
-            ]), className="shadow-sm"), md=3),
-        ], className="mb-4"),
-
-        dbc.Row([
-            dbc.Col(
-                dbc.Card([
-                    dbc.CardHeader("Allocate / Deallocate"),
-                    dbc.CardBody([
-                        dcc.RadioItems(
-                            id="action",
-                            options=[
-                                {"label":"Allocate","value":"allocate"},
-                                {"label":"Deallocate","value":"deallocate"}
-                            ],
-                            value="allocate"
-                        ),
-                        dbc.Input(id="storage", type="number", placeholder="Storage (GB)", className="mt-2"),
-                        dbc.Input(id="ram", type="number", placeholder="RAM (GB)", className="mt-2"),
-                        dbc.Input(id="cpu", type="number", placeholder="CPU (cores)", className="mt-2"),
-                        dbc.Button("Submit", id="submit", color="primary", className="mt-3"),
-                        html.Div(id="status", className="mt-2")
-                    ])
-                ], className="shadow-sm"),
-                md=3
-            ),
-
-            dbc.Col(
-                dbc.Card([
-                    dbc.CardHeader("Capacity Usage Trend"),
-                    dbc.CardBody(dcc.Graph(id="trend"))
-                ], className="shadow-sm"),
-                md=9
-            )
-        ], className="mb-4"),
-
-        dbc.Card([
-            dbc.CardHeader("Recent Allocation Events"),
-            dbc.CardBody(html.Div(id="events"))
-        ], className="shadow-sm")
-
-    ]),
-
-    # ================= INVENTORY TAB =================
-    html.Div(id="inventory-tab", style={"display":"none"}, children=[
-        dbc.Card([
-            dbc.CardHeader("Inventory (Read Only)"),
-            dbc.CardBody(
-                dbc.Table.from_dataframe(
-                    load_inventory(),
-                    striped=True,
-                    bordered=False,
-                    hover=True,
-                    responsive=True
-                )
-            )
-        ], className="shadow-sm")
-    ])
+    # ===== RECENT EVENTS =====
+    dbc.Card([
+        dbc.CardHeader("Recent Allocation Events"),
+        dbc.CardBody(html.Div(id="events"))
+    ], className="shadow-sm")
 
 ])
 
-# ================= TAB SWITCH =================
+# ================= CALLBACKS =================
 @app.callback(
-    Output("capacity-tab","style"),
-    Output("inventory-tab","style"),
-    Input("tabs","value")
-)
-def switch_tab(tab):
-    if tab == "capacity":
-        return {"display":"block"}, {"display":"none"}
-    return {"display":"none"}, {"display":"block"}
-
-# ================= CAPACITY CALLBACK =================
-@app.callback(
-    Output("kpi-total","children"),
-    Output("kpi-reserved","children"),
-    Output("kpi-usable","children"),
-    Output("kpi-used","children"),
+    Output("kpi-row","children"),
     Output("trend","figure"),
     Output("events","children"),
-    Input("server","value")
+    Input("status","children")  # refresh trigger
 )
-def update_dashboard(server):
-    if not server:
-        empty_fig = go.Figure()
-        empty_fig.update_layout(height=300)
-        return "-", "-", "-", "-", empty_fig, ""
+def refresh_dashboard(_):
+    cap = get_global_capacity()
 
-    # SAFE inventory read
-    df = pd.read_sql("""
-        SELECT COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC AS used
-        FROM inventory
-        WHERE assetuniquename=%s
-    """, ENGINE, params=[server])
+    kpis = [
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("Total Capacity"),
+            html.H2(f"{cap['total']:.1f} GB")
+        ]), className="shadow-sm"), md=3),
 
-    used = float(df.iloc[0]["used"])
-    total = used / 0.7 if used else 0
-    reserved = total * 0.3
-    usable = total * 0.7
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("Reserved (30%)"),
+            html.H2(f"{cap['reserved']:.1f} GB")
+        ]), className="shadow-sm"), md=3),
 
-    # Trend (safe)
-    events = load_events(server)
-    fig = go.Figure()
-    if not events.empty:
-        fig.add_trace(go.Scatter(
-            x=events["created_at"],
-            y=events["change_value"].cumsum(),
-            fill="tozeroy"
-        ))
-    fig.update_layout(height=300, margin=dict(l=20,r=20,t=20,b=20))
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("Usable Capacity"),
+            html.H2(f"{cap['usable']:.1f} GB")
+        ]), className="shadow-sm"), md=3),
 
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("Currently Used"),
+            html.H2(f"{cap['used']:.1f} GB")
+        ]), className="shadow-sm"), md=3),
+    ]
+
+    events = get_recent_events()
     table = (
         dbc.Table.from_dataframe(events, striped=True, hover=True)
-        if not events.empty else "No events"
+        if not events.empty else "No recent events"
     )
 
-    return (
-        f"{total:.1f} GB",
-        f"{reserved:.1f} GB",
-        f"{usable:.1f} GB",
-        f"{used:.1f} GB",
-        fig,
-        table
-    )
+    return kpis, get_trend(), table
 
 # ================= RUN =================
 if __name__ == "__main__":
