@@ -1,4 +1,3 @@
-import base64, io
 import pandas as pd
 import plotly.express as px
 from sqlalchemy import create_engine, text
@@ -22,7 +21,7 @@ def fmt(v, unit):
 def color(p):
     return "danger" if p >= ALERT_THRESHOLD else "success"
 
-# ================= CORE CALC =================
+# ================= CAPACITY LOGIC =================
 def calc_capacity():
     inv = pd.read_sql("""
         SELECT
@@ -60,20 +59,27 @@ def calc_capacity():
 
     return used, total, reserved, usable, pct
 
-def kpi(title, used, total, reserved, usable, pct, unit):
+# ================= KPI CARD =================
+def kpi(title, used, total, reserved, usable, pct, unit, icon):
     return dbc.Card(
         dbc.CardBody([
-            html.H6(title),
-            html.H3(fmt(used, unit), className=f"text-{color(pct)}"),
-            html.P(f"Total: {fmt(total, unit)}"),
-            html.P(f"Reserved (30%): {fmt(reserved, unit)}"),
-            html.P(f"Usable: {fmt(usable, unit)}"),
-            html.Small(f"Used: {pct:.1f}%")
+            html.Div([
+                html.I(className=f"bi bi-{icon} fs-3 me-2"),
+                html.Span(title, className="fw-bold")
+            ], className="d-flex justify-content-center align-items-center mb-2"),
+
+            html.H3(fmt(used, unit), className=f"text-{color(pct)} fw-bold"),
+            html.Small(f"Total: {fmt(total, unit)}"), html.Br(),
+            html.Small(f"Reserved (30%): {fmt(reserved, unit)}"), html.Br(),
+            html.Small(f"Usable: {fmt(usable, unit)}"),
+            html.Hr(),
+            html.Small(f"Used: {pct:.1f}%", className="fw-bold")
         ]),
-        className="shadow text-center"
+        className="shadow-sm text-center",
+        style={"minHeight": "240px"}
     )
 
-# ================= TREND =================
+# ================= TREND GRAPH =================
 def build_trend(resource):
     base = pd.read_sql("""
         SELECT
@@ -91,29 +97,59 @@ def build_trend(resource):
         WHERE lower(resource_type)=:r
         GROUP BY DATE(event_time)
         ORDER BY d
-    """, ENGINE, params={"r":resource})
+    """, ENGINE, params={"r": resource})
 
     if df.empty:
-        return px.line(title="No trend data yet")
+        df = pd.DataFrame({
+            "d": [pd.Timestamp.today().normalize()],
+            "v": [0]
+        })
+    else:
+        first_day = df["d"].iloc[0] - pd.Timedelta(days=1)
+        df = pd.concat([
+            pd.DataFrame({"d": [first_day], "v": [0]}),
+            df
+        ])
 
     df["used"] = baseline + df["v"].cumsum()
 
-    fig = px.line(df, x="d", y="used", markers=True,
-                  title=f"{resource.upper()} Usage Trend")
-    fig.update_layout(xaxis_title="Date", yaxis_title="Used")
+    fig = px.area(
+        df,
+        x="d",
+        y="used",
+        title=f"{resource.upper()} Usage Trend",
+        template="plotly_white"
+    )
+
+    fig.update_layout(
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis_title="Date",
+        yaxis_title="Used Capacity"
+    )
+
     return fig
 
 # ================= APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
+app = Dash(
+    __name__,
+    external_stylesheets=[
+        dbc.themes.FLATLY,
+        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css"
+    ]
+)
+
 app.title = "Server Capacity Dashboard"
 
 app.layout = dbc.Container(fluid=True, children=[
     html.H3("Server Capacity Dashboard", className="text-center my-3"),
 
     dbc.Tabs([
+        # ===== DASHBOARD =====
         dbc.Tab(label="Dashboard", children=[
             dbc.Row(id="kpis", className="mt-3"),
             html.Hr(),
+
             dcc.Dropdown(
                 id="trend-resource",
                 options=[
@@ -125,11 +161,13 @@ app.layout = dbc.Container(fluid=True, children=[
                 clearable=False
             ),
             dcc.Graph(id="trend-graph"),
+
             html.Hr(),
             html.H5("Recent Events"),
             html.Div(id="events-table")
         ]),
 
+        # ===== EVENTS =====
         dbc.Tab(label="Events", children=[
             dbc.Row([
                 dbc.Col([
@@ -150,7 +188,7 @@ app.layout = dbc.Container(fluid=True, children=[
                         placeholder="Action"
                     ),
                     dbc.Input(id="value", type="number", placeholder="Value"),
-                    dbc.Button("Submit", id="submit", color="primary", className="mt-2"),
+                    dbc.Button("Submit Event", id="submit", color="primary", className="mt-2"),
                     html.Div(id="msg", className="mt-2")
                 ], md=4),
 
@@ -158,6 +196,7 @@ app.layout = dbc.Container(fluid=True, children=[
             ], className="mt-3")
         ]),
 
+        # ===== INVENTORY =====
         dbc.Tab(label="Inventory", children=[
             html.H5("Inventory (Read Only)", className="mt-3"),
             html.Div(id="inventory-table")
@@ -170,9 +209,9 @@ app.layout = dbc.Container(fluid=True, children=[
 def load_kpis(_):
     u,t,r,us,p = calc_capacity()
     return [
-        dbc.Col(kpi("STORAGE",u["storage"],t["storage"],r["storage"],us["storage"],p["storage"],"gb"),md=4),
-        dbc.Col(kpi("RAM",u["ram"],t["ram"],r["ram"],us["ram"],p["ram"],"gb"),md=4),
-        dbc.Col(kpi("CPU",u["cpu"],t["cpu"],r["cpu"],us["cpu"],p["cpu"],"cpu"),md=4),
+        dbc.Col(kpi("STORAGE",u["storage"],t["storage"],r["storage"],us["storage"],p["storage"],"gb","hdd"),md=4),
+        dbc.Col(kpi("RAM",u["ram"],t["ram"],r["ram"],us["ram"],p["ram"],"gb","memory"),md=4),
+        dbc.Col(kpi("CPU",u["cpu"],t["cpu"],r["cpu"],us["cpu"],p["cpu"],"cpu","cpu"),md=4),
     ]
 
 @app.callback(Output("trend-graph","figure"),
@@ -215,7 +254,7 @@ def add_event(_, s, r, a, v):
     """, ENGINE)
 
     table = dbc.Table.from_dataframe(df, striped=True, hover=True)
-    return dbc.Alert("Event added", color="success"), table, table
+    return dbc.Alert("Event added successfully", color="success"), table, table
 
 @app.callback(Output("inventory-table","children"),
               Input("inventory-table","id"))
