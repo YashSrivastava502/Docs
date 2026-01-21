@@ -1,65 +1,330 @@
-#!/usr/bin/env python3
-import logging
 import pandas as pd
-from datetime import datetime
-from database import get_engine
+from datetime import date, datetime
+from sqlalchemy import create_engine, text
+from dash import Dash, html, dcc, Input, Output, callback
+import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler("logs/snapshot_refresh.log"),
-        logging.StreamHandler()
-    ]
+# ────────────────────────────────────────────────
+#  CONFIG & DB CONNECTION
+# ────────────────────────────────────────────────
+DB_URI = "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory"
+
+engine = create_engine(
+    DB_URI,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=1800,
+    connect_args={"application_name": "capacity-dashboard"}
 )
-logger = logging.getLogger(__name__)
 
-def refresh():
-    logger.info("Refreshing snapshot")
+# ────────────────────────────────────────────────
+#  DATA LOADERS
+# ────────────────────────────────────────────────
+def get_latest_snapshot():
+    query = """
+        SELECT 
+            storage_used_gb,
+            ram_used_gb,
+            cpu_used_cores,
+            snapshot_time
+        FROM server_capacity_snapshot
+        ORDER BY snapshot_time DESC
+        LIMIT 1
+    """
+    df = pd.read_sql(query, engine)
+    if df.empty:
+        return pd.Series({
+            'storage_used_gb': 0.0,
+            'ram_used_gb': 0.0,
+            'cpu_used_cores': 0.0,
+            'snapshot_time': None
+        })
+    return df.iloc[0]
 
-    try:
-        engine = get_engine()
 
-        # Latest baseline
-        master = pd.read_sql("""
-            SELECT total_storage_gb, total_ram_gb, total_cpu_cores
-            FROM server_capacity_master
-            ORDER BY last_updated DESC LIMIT 1
-        """, engine).iloc[0]
+def get_capacity_totals():
+    query = """
+        SELECT 
+            total_storage_gb,
+            total_ram_gb,
+            total_cpu_cores
+        FROM server_capacity_master
+        ORDER BY last_updated DESC
+        LIMIT 1
+    """
+    df = pd.read_sql(query, engine)
+    if df.empty:
+        raise ValueError("No records found in server_capacity_master")
+    return df.iloc[0]
 
-        # All-time net deltas
-        deltas = pd.read_sql("""
-            SELECT resource_type, SUM(change_value) AS delta
-            FROM server_capacity_events
-            GROUP BY resource_type
-        """, engine).set_index("resource_type")["delta"].to_dict()
 
-        used_storage = master["total_storage_gb"] + deltas.get("storage", 0)
-        used_ram     = master["total_ram_gb"]     + deltas.get("ram",     0)
-        used_cpu     = master["total_cpu_cores"]  + deltas.get("cpu",     0)
+def load_trend_data(resource: str):
+    query = """
+        SELECT 
+            DATE(event_time) AS day,
+            SUM(change_value) AS net_change
+        FROM server_capacity_events
+        WHERE resource_type = :res
+        GROUP BY DATE(event_time)
+        ORDER BY day ASC
+    """
+    df = pd.read_sql(query, engine, params={"res": resource})
+    if df.empty:
+        return pd.DataFrame(columns=['day', 'cumulative'])
+    df['cumulative'] = df['net_change'].cumsum()
+    return df
 
-        used_storage = max(0, used_storage)
-        used_ram     = max(0, used_ram)
-        used_cpu     = max(0, used_cpu)
 
-        with engine.connect() as conn:
-            conn.execute("""
-                INSERT INTO server_capacity_snapshot
-                (storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time)
-                VALUES (%s, %s, %s, NOW())
-            """, (used_storage, used_ram, used_cpu))
-            conn.commit()
+def load_events(start_date, end_date):
+    query = """
+        SELECT 
+            event_time,
+            assetuniquename AS server,
+            resource_type,
+            action,
+            change_value,
+            source,
+            reason
+        FROM server_capacity_events
+        WHERE event_time::date BETWEEN :start AND :end
+        ORDER BY event_time DESC
+    """
+    df = pd.read_sql(
+        text(query),
+        engine,
+        params={"start": start_date, "end": end_date}
+    )
+    return df
 
-        logger.info(
-            f"Snapshot updated → "
-            f"Storage: {used_storage:,.1f} GB | "
-            f"RAM: {used_ram:,.1f} GB | "
-            f"CPU: {used_cpu:,.0f} cores"
+
+# ────────────────────────────────────────────────
+#  FORMATTERS & HELPERS
+# ────────────────────────────────────────────────
+def fmt_gb(v: float) -> str:
+    if v >= 1024:
+        return f"{v/1024:,.2f} TB"
+    return f"{int(round(v)):,} GB"
+
+
+def fmt_cores(v: float) -> str:
+    return f"{int(round(v)):,} cores"
+
+
+def usage_color(pct: float) -> str:
+    if pct >= 85: return "danger"
+    if pct >= 70: return "warning"
+    return "success"
+
+
+def create_kpi_card(title: str, used: float, total: float, unit: str, fmt_func=fmt_gb):
+    free = total - used
+    pct = (used / total * 100) if total > 0 else 0
+    color = usage_color(pct)
+
+    subtitle = f"{pct:.1f}% used" if pct > 0 else "No usage"
+
+    return dbc.Card([
+        dbc.CardBody([
+            html.H6(title, className="card-title text-muted mb-1"),
+            html.H4(fmt_func(used), className=f"text-{color} mb-2"),
+            html.Hr(className="my-2"),
+            html.Small([
+                f"Total: {fmt_func(total)}  •  ",
+                f"Free: {fmt_func(free)}"
+            ], className="d-block text-muted"),
+            html.Small(subtitle, className="d-block fw-bold mt-1")
+        ])
+    ], className="shadow-sm text-center border-0 h-100")
+
+
+# ────────────────────────────────────────────────
+#  DASH APP SETUP
+# ────────────────────────────────────────────────
+app = Dash(__name__, external_stylesheets=[dbc.themes.LUX], suppress_callback_exceptions=True)
+app.title = "Server Capacity Dashboard"
+
+app.layout = dbc.Container(fluid=True, className="p-4", children=[
+
+    html.H2("Server Capacity Overview", className="text-center mb-3"),
+
+    html.Div(id="last-snapshot-info", className="text-center text-muted mb-4 small fw-light"),
+
+    dbc.Row(id="kpi-cards", className="mb-5 g-4"),
+
+    dbc.Row(gutter=4, children=[
+
+        # ── Capacity Trend ────────────────────────────────
+        dbc.Col(md=7, children=dbc.Card([
+            dbc.CardHeader(
+                html.Div([
+                    html.Span("Capacity Trend", className="me-3 align-middle"),
+                    dcc.Dropdown(
+                        id="resource-selector",
+                        options=[
+                            {"label": "Storage", "value": "storage"},
+                            {"label": "RAM",     "value": "ram"},
+                            {"label": "CPU",     "value": "cpu"}
+                        ],
+                        value="storage",
+                        clearable=False,
+                        style={"width": "220px", "display": "inline-block"}
+                    )
+                ], className="d-flex align-items-center justify-content-between flex-wrap")
+            ),
+            dbc.CardBody([
+                dcc.Graph(id="trend-figure", style={"height": "380px"})
+            ])
+        ])),
+
+        # ── Recent Events ─────────────────────────────────
+        dbc.Col(md=5, children=dbc.Card([
+            dbc.CardHeader("Recent Events"),
+            dbc.CardBody([
+                dcc.DatePickerRange(
+                    id="event-date-picker",
+                    min_date_allowed=date(2025, 1, 1),
+                    start_date=date.today(),
+                    end_date=date.today(),
+                    display_format="DD MMM YYYY",
+                    className="mb-3"
+                ),
+                html.Div(id="events-table-container", style={"maxHeight": "420px", "overflowY": "auto"})
+            ])
+        ]))
+
+    ])
+])
+
+
+# ────────────────────────────────────────────────
+#  CALLBACKS
+# ────────────────────────────────────────────────
+@callback(
+    Output("last-snapshot-info", "children"),
+    Input("resource-selector", "value")  # just a trigger
+)
+def update_snapshot_timestamp(_):
+    snap = get_latest_snapshot()
+    if snap["snapshot_time"] is None:
+        return "No capacity snapshot available yet"
+    ts = pd.Timestamp(snap["snapshot_time"]).strftime("%d %b %Y  %H:%M:%S IST")
+    return f"Current capacity snapshot as of: {ts}"
+
+
+@callback(
+    Output("kpi-cards", "children"),
+    Input("last-snapshot-info", "children")  # trigger on load + refresh
+)
+def update_kpis(_):
+    snap = get_latest_snapshot()
+    totals = get_capacity_totals()
+
+    return [
+        dbc.Col(
+            create_kpi_card("STORAGE", snap["storage_used_gb"], totals["total_storage_gb"], "GB"),
+            md=4
+        ),
+        dbc.Col(
+            create_kpi_card("RAM", snap["ram_used_gb"], totals["total_ram_gb"], "GB"),
+            md=4
+        ),
+        dbc.Col(
+            create_kpi_card("CPU", snap["cpu_used_cores"], totals["total_cpu_cores"], "cores", fmt_cores),
+            md=4
+        )
+    ]
+
+
+@callback(
+    Output("trend-figure", "figure"),
+    Input("resource-selector", "value")
+)
+def update_trend(resource):
+    df = load_trend_data(resource)
+
+    title_map = {"storage": "Storage", "ram": "RAM", "cpu": "CPU"}
+    y_label = f"Cumulative Net Change – {title_map[resource]}"
+
+    fig = go.Figure()
+
+    if not df.empty:
+        fig.add_trace(go.Scatter(
+            x=df["day"],
+            y=df["cumulative"],
+            mode="lines+markers",
+            name="Net change",
+            line=dict(width=2.5, color="#0d6efd"),
+            marker=dict(size=6)
+        ))
+
+    fig.update_layout(
+        height=380,
+        margin=dict(l=50, r=20, t=20, b=60),
+        xaxis_title="Date",
+        yaxis_title=y_label,
+        hovermode="x unified",
+        plot_bgcolor="rgba(240,240,240,0.4)",
+        paper_bgcolor="white",
+        font=dict(size=12)
+    )
+
+    if df.empty:
+        fig.update_layout(annotations=[dict(
+            text="No events recorded yet",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=16, color="gray")
+        )])
+
+    return fig
+
+
+@callback(
+    Output("events-table-container", "children"),
+    Input("event-date-picker", "start_date"),
+    Input("event-date-picker", "end_date")
+)
+def update_events(start, end):
+    if start is None or end is None:
+        return dbc.Alert("Please select a date range", color="info", className="mt-3")
+
+    df = load_events(start, end)
+
+    if df.empty:
+        return dbc.Alert(
+            f"No capacity events found between {start} and {end}",
+            color="secondary",
+            className="mt-3"
         )
 
-    except Exception as e:
-        logger.error("Snapshot refresh failed", exc_info=True)
+    # Nice column names
+    df = df.rename(columns={
+        "event_time": "Time",
+        "server": "Server",
+        "resource_type": "Resource",
+        "action": "Action",
+        "change_value": "Δ Value",
+        "source": "Source",
+        "reason": "Reason"
+    })
+
+    table = dbc.Table.from_dataframe(
+        df,
+        striped=True,
+        bordered=True,
+        hover=True,
+        responsive=True,
+        size="sm",
+        style={"fontSize": "0.9rem"}
+    )
+
+    return table
 
 
 if __name__ == "__main__":
-    refresh()
+    app.run(host="0.0.0.0", port=8050, debug=True)
+    # For production → use gunicorn + nginx or similar
+    # Example: gunicorn -w 4 -b 0.0.0.0:8050 app:server
