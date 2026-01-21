@@ -1,24 +1,3 @@
-# ---------- DATABASE ----------
-DB_CONFIG = {
-    "host": "10.7.32.181",
-    "port": 5432,
-    "dbname": "GlobalInventory",
-    "user": "postgres",
-    "password": "YOUR_PASSWORD"
-}
-
-# ---------- CAPACITY TOTALS ----------
-CAPACITY = {
-    "storage_gb": 5120,     # 5 TB
-    "ram_gb": 40000,        # GB
-    "cpu_cores": 20000,     # cores
-    "reserved_pct": 0.30    # 30%
-}
-
-# ---------- UI ----------
-ALERT_THRESHOLD = 75  # %
-
-
 import pandas as pd
 from sqlalchemy import create_engine, text
 from dash import Dash, dcc, html, Input, Output, State
@@ -41,17 +20,18 @@ def fmt(v, unit):
 def pct_color(p):
     return "danger" if p >= ALERT_THRESHOLD else "success"
 
+# ================= CORE FIXED CALCULATION =================
 def calc_capacity():
-    # Inventory baseline
+    # ---- SAFE inventory baseline (TEXT-safe) ----
     inv = pd.read_sql("""
         SELECT
-          COALESCE(SUM(totaldisk::numeric),0)               AS storage_used,
-          COALESCE(SUM(servermemory::numeric)/1024,0)       AS ram_used,
-          COALESCE(SUM(servercores::numeric),0)             AS cpu_used
+          COALESCE(SUM(NULLIF(totaldisk,'')::numeric),0)          AS storage_used,
+          COALESCE(SUM(NULLIF(servermemory,'')::numeric)/1024,0) AS ram_used,
+          COALESCE(SUM(NULLIF(servercores,'')::numeric),0)        AS cpu_used
         FROM inventory
     """, ENGINE)
 
-    # Events delta
+    # ---- SAFE events delta ----
     ev = pd.read_sql("""
         SELECT resource_type, COALESCE(SUM(change_value),0) AS delta
         FROM server_capacity_events
@@ -64,9 +44,11 @@ def calc_capacity():
         "cpu": float(inv.cpu_used.iloc[0]),
     }
 
+    # ---- NORMALIZE resource_type (FIX) ----
     for _, r in ev.iterrows():
-        if r.resource_type in used:
-            used[r.resource_type] += float(r.delta)
+        key = str(r.resource_type).strip().lower()
+        if key in used:
+            used[key] += float(r.delta)
 
     totals = {
         "storage": CAPACITY["storage_gb"],
@@ -129,7 +111,7 @@ app.layout = dbc.Container(fluid=True, children=[
                         ],
                         placeholder="Action"
                     ),
-                    dbc.Input(id="value", type="number", placeholder="Value (+ / -)"),
+                    dbc.Input(id="value", type="number", placeholder="Value"),
                     dbc.Button("Submit", id="submit", color="primary", className="mt-2")
                 ], md=4),
 
