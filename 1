@@ -1,88 +1,66 @@
 #!/usr/bin/env python3
 """
-CSV → server_capacity_events ingestion
-Run manually or via cron / Airflow / systemd timer
+Recalculates server_capacity_snapshot from master + all historical events
+Run after ingestion or on fixed schedule
 """
 
 import logging
-import pandas as pd
-from pathlib import Path
 from datetime import datetime
-from sqlalchemy.exc import SQLAlchemyError
-from config import (
-    CSV_INCOMING_FOLDER, CSV_PROCESSED_FOLDER,
-    EXPECTED_CSV_COLUMNS, USE_ACTION_FOR_SIGN
-)
-from database import engine, run_sql
+import pandas as pd
+from database import query_df, run_sql
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("logs/ingest_csv.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("logs/snapshot_refresh.log"), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-def process_one_csv(file_path: Path):
-    logger.info(f"Processing {file_path.name}")
+def refresh_snapshot():
+    logger.info("Refreshing snapshot")
 
     try:
-        df = pd.read_csv(file_path, parse_dates=["event_time"])
+        # Get latest baseline
+        master = query_df("""
+            SELECT total_storage_gb, total_ram_gb, total_cpu_cores
+            FROM server_capacity_master
+            ORDER BY last_updated DESC LIMIT 1
+        """).iloc[0]
 
-        # Validate columns
-        missing = set(EXPECTED_CSV_COLUMNS) - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
+        # Sum all historical deltas
+        deltas = query_df("""
+            SELECT 
+                resource_type,
+                SUM(change_value) AS total_delta
+            FROM server_capacity_events
+            GROUP BY resource_type
+        """).set_index("resource_type")["total_delta"].to_dict()
 
-        # Normalize resource_type
-        df["resource_type"] = df["resource_type"].str.lower().str.strip()
+        used = {
+            "storage": master["total_storage_gb"] + deltas.get("storage", 0),
+            "ram":     master["total_ram_gb"]     + deltas.get("ram", 0),
+            "cpu":     master["total_cpu_cores"]  + deltas.get("cpu", 0),
+        }
 
-        # Prepare sign-aware change_value
-        if USE_ACTION_FOR_SIGN:
-            df["change_value"] = df.apply(
-                lambda row: row["change_value"] if row["action"].lower() in ["allocate", "add"]
-                else -row["change_value"],
-                axis=1
-            )
+        # Safety: cannot be negative
+        used = {k: max(0, v) for k, v in used.items()}
 
-        # Add metadata
-        df["source"] = df.get("source", "csv").fillna("csv")
-        df["inserted_at"] = datetime.utcnow()
+        # Insert new snapshot
+        run_sql("""
+            INSERT INTO server_capacity_snapshot
+            (storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time)
+            VALUES (:s, :r, :c, NOW())
+        """, {
+            "s": used["storage"],
+            "r": used["ram"],
+            "c": used["cpu"]
+        })
 
-        # Insert
-        df.to_sql(
-            "server_capacity_events",
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi"
-        )
-
-        logger.info(f"Inserted {len(df)} rows from {file_path.name}")
-
-        # Move to processed
-        target = CSV_PROCESSED_FOLDER / f"{file_path.stem}_{datetime.now():%Y%m%d_%H%M%S}{file_path.suffix}"
-        file_path.rename(target)
-        logger.info(f"Moved to {target}")
+        logger.info(f"New snapshot created → Storage: {used['storage']:.1f} GB | RAM: {used['ram']:.1f} GB | CPU: {used['cpu']:.0f} cores")
 
     except Exception as e:
-        logger.error(f"Failed to process {file_path.name}: {e}", exc_info=True)
-        # Optional: move to failed/ folder
-        failed_dir = CSV_INCOMING_FOLDER / "failed"
-        failed_dir.mkdir(exist_ok=True)
-        file_path.rename(failed_dir / file_path.name)
-
-
-def main():
-    logger.info("Starting CSV ingestion run")
-
-    for csv_file in CSV_INCOMING_FOLDER.glob("*.csv"):
-        process_one_csv(csv_file)
-
-    logger.info("Ingestion run completed")
+        logger.error("Snapshot refresh failed", exc_info=True)
 
 
 if __name__ == "__main__":
-    main()
+    refresh_snapshot()
