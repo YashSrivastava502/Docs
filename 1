@@ -1,20 +1,14 @@
-from pathlib import Path
-from datetime import time
+from sqlalchemy import create_engine
+from config import DB_CONNECTION_STRING
 
-BASE_DIR = Path(__file__).resolve().parent
+engine = create_engine(
+    DB_CONNECTION_STRING,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=1800,
+    connect_args={"application_name": "capacity-system"}
+)
 
-# Folders
-INCOMING_CSV_FOLDER = BASE_DIR / "incoming_csv"
-PROCESSED_CSV_FOLDER = BASE_DIR / "incoming_csv" / "processed"
-FAILED_CSV_FOLDER    = BASE_DIR / "incoming_csv" / "failed"
-LOG_DIR              = BASE_DIR / "logs"
-
-for folder in [INCOMING_CSV_FOLDER, PROCESSED_CSV_FOLDER, FAILED_CSV_FOLDER, LOG_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
-
-# Database
-DB_CONNECTION_STRING = "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory"
-
-# CSV format expectations
-CSV_DATE_COLUMN = "date"           # users provide only YYYY-MM-DD
-EVENT_TIME_DEFAULT_HOUR = 23       # we set event_time to 23:59:59 of that day
+def get_engine():
+    return engine
