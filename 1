@@ -1,26 +1,88 @@
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import QueuePool
+#!/usr/bin/env python3
+"""
+CSV → server_capacity_events ingestion
+Run manually or via cron / Airflow / systemd timer
+"""
+
+import logging
 import pandas as pd
-from config import DB_URI
-
-engine = create_engine(
-    DB_URI,
-    poolclass=QueuePool,
-    pool_size=8,
-    max_overflow=12,
-    pool_pre_ping=True,
-    pool_recycle=1800,
-    connect_args={"application_name": "capacity-dashboard"}
+from pathlib import Path
+from datetime import datetime
+from sqlalchemy.exc import SQLAlchemyError
+from config import (
+    CSV_INCOMING_FOLDER, CSV_PROCESSED_FOLDER,
+    EXPECTED_CSV_COLUMNS, USE_ACTION_FOR_SIGN
 )
+from database import engine, run_sql
 
-def get_connection():
-    return engine.connect()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("logs/ingest_csv.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-def run_sql(sql: str, params=None):
-    with get_connection() as conn:
-        conn.execute(text(sql), params or {})
-        conn.commit()
+def process_one_csv(file_path: Path):
+    logger.info(f"Processing {file_path.name}")
 
-def query_df(sql: str, params=None) -> pd.DataFrame:
-    with get_connection() as conn:
-        return pd.read_sql(text(sql), conn, params=params)
+    try:
+        df = pd.read_csv(file_path, parse_dates=["event_time"])
+
+        # Validate columns
+        missing = set(EXPECTED_CSV_COLUMNS) - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing columns: {missing}")
+
+        # Normalize resource_type
+        df["resource_type"] = df["resource_type"].str.lower().str.strip()
+
+        # Prepare sign-aware change_value
+        if USE_ACTION_FOR_SIGN:
+            df["change_value"] = df.apply(
+                lambda row: row["change_value"] if row["action"].lower() in ["allocate", "add"]
+                else -row["change_value"],
+                axis=1
+            )
+
+        # Add metadata
+        df["source"] = df.get("source", "csv").fillna("csv")
+        df["inserted_at"] = datetime.utcnow()
+
+        # Insert
+        df.to_sql(
+            "server_capacity_events",
+            engine,
+            if_exists="append",
+            index=False,
+            method="multi"
+        )
+
+        logger.info(f"Inserted {len(df)} rows from {file_path.name}")
+
+        # Move to processed
+        target = CSV_PROCESSED_FOLDER / f"{file_path.stem}_{datetime.now():%Y%m%d_%H%M%S}{file_path.suffix}"
+        file_path.rename(target)
+        logger.info(f"Moved to {target}")
+
+    except Exception as e:
+        logger.error(f"Failed to process {file_path.name}: {e}", exc_info=True)
+        # Optional: move to failed/ folder
+        failed_dir = CSV_INCOMING_FOLDER / "failed"
+        failed_dir.mkdir(exist_ok=True)
+        file_path.rename(failed_dir / file_path.name)
+
+
+def main():
+    logger.info("Starting CSV ingestion run")
+
+    for csv_file in CSV_INCOMING_FOLDER.glob("*.csv"):
+        process_one_csv(csv_file)
+
+    logger.info("Ingestion run completed")
+
+
+if __name__ == "__main__":
+    main()
