@@ -1,161 +1,331 @@
-import pandas as pd
-from datetime import date
-from sqlalchemy import create_engine, text
-from dash import Dash, html, dcc, Input, Output, State
-import dash_bootstrap_components as dbc
-import plotly.graph_objs as go
+Alright. I’ll write this cleanly, clearly, and correctly, so you can use it as project documentation / design note / interview explanation.
 
-# ================= CONFIG =================
-ENGINE = create_engine(
-    "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory",
-    pool_pre_ping=True
-)
+No code.
+No assumptions.
+Just your requirement and the tables we created/used.
 
-RESERVED = 0.30
 
-# TEMP TOTALS (YOU WILL REPLACE)
-TOTAL_CAPACITY = {
-    "storage": 1000.0,  # GB (X)
-    "ram": 500.0,       # GB (Y)
-    "cpu": 200.0        # cores (Z)
-}
+---
 
-# ================= HELPERS =================
-def fmt_gb(v):
-    return f"{v/1024:.1f} TB" if v >= 1024 else f"{v:.1f} GB"
+📌 YOUR REQUIREMENT (AS FINALLY AGREED)
 
-def safe(v):
-    return float(v or 0)
+1️⃣ Business Problem
 
-# ================= DATA =================
-def inventory_baseline():
-    return pd.read_sql("""
-        SELECT
-            assetuniquename,
-            serveros,
-            COALESCE(NULLIF(servercores,''),'0')::NUMERIC AS cpu,
-            COALESCE(NULLIF(servermemory,''),'0')::NUMERIC / 1024 AS ram,
-            COALESCE(NULLIF(totaldisk,''),'0')::NUMERIC AS storage
-        FROM inventory
-    """, ENGINE)
+You want a capacity management dashboard that can answer this question at any time:
 
-def event_usage():
-    return pd.read_sql("""
-        SELECT resource_type, SUM(change_value) val
-        FROM server_capacity_events
-        GROUP BY resource_type
-    """, ENGINE)
+> “What is the current capacity (CPU, RAM, Storage) right now?”
 
-def compute_used():
-    inv = inventory_baseline()
-    ev = event_usage().set_index("resource_type")["val"].to_dict()
 
-    return {
-        "storage": inv["storage"].sum() + safe(ev.get("storage")),
-        "ram": inv["ram"].sum() + safe(ev.get("ram")),
-        "cpu": inv["cpu"].sum() + safe(ev.get("cpu")),
-    }
 
-# ================= KPI CARD =================
-def kpi_card(name, used, total, unit):
-    reserved = total * RESERVED
-    usable = total - reserved
-    pct = (used / usable * 100) if usable else 0
-    color = "danger" if pct >= 75 else "success"
+The challenge is:
 
-    used_txt = f"{used:.0f} cores" if unit == "CPU" else fmt_gb(used)
+Inventory comes weekly
 
-    return dbc.Card([
-        dbc.CardHeader(name),
-        dbc.CardBody([
-            html.P(f"Total: {fmt_gb(total) if unit!='CPU' else f'{total:.0f} cores'}"),
-            html.P(f"Reserved (30%): {fmt_gb(reserved) if unit!='CPU' else f'{reserved:.0f} cores'}"),
-            html.P(f"Usable: {fmt_gb(usable) if unit!='CPU' else f'{usable:.0f} cores'}"),
-            html.H5(f"Used: {used_txt} ({pct:.0f}%)", className=f"text-{color}")
-        ])
-    ], className="shadow-sm")
+Capacity changes happen daily
 
-# ================= APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-app.title = "Server Capacity Dashboard"
+You must not modify inventory daily
 
-# ================= LAYOUT =================
-app.layout = dbc.Container(fluid=True, children=[
+You must still show accurate current capacity
 
-    html.H3("Server Capacity Dashboard", className="my-3"),
 
-    dcc.Tabs(children=[
 
-        # -------- DASHBOARD --------
-        dcc.Tab(label="Dashboard", children=[
-            dbc.Row(id="kpis", className="mb-4"),
+---
 
-            dbc.Row([
-                dbc.Col(
-                    dbc.Card([
-                        dbc.CardHeader("Capacity Trend"),
-                        dbc.CardBody([
-                            dcc.Dropdown(
-                                id="trend-resource",
-                                options=[
-                                    {"label":"Storage","value":"storage"},
-                                    {"label":"RAM","value":"ram"},
-                                    {"label":"CPU","value":"cpu"}
-                                ],
-                                value="storage"
-                            ),
-                            dcc.Graph(id="trend")
-                        ])
-                    ]),
-                    md=7
-                ),
+2️⃣ Core Concept
 
-                dbc.Col(
-                    dbc.Card([
-                        dbc.CardHeader("Recent Events"),
-                        dbc.CardBody([
-                            dcc.DatePickerRange(
-                                id="date-filter",
-                                start_date=date.today(),
-                                end_date=date.today()
-                            ),
-                            html.Div(id="events")
-                        ])
-                    ]),
-                    md=5
-                )
-            ])
-        ]),
+You designed the system with three layers:
 
-        # -------- INVENTORY --------
-        dcc.Tab(label="Inventory", children=[
-            dbc.Input(id="inv-filter", placeholder="Filter by server name", className="mb-2"),
-            html.Div(id="inventory-table")
-        ])
+🔹 Inventory (Baseline)
 
-    ])
-])
+Comes weekly
 
-# ================= CALLBACKS =================
-@app.callback(Output("kpis","children"), Input("trend-resource","value"))
-def refresh_kpis(_):
-    used = compute_used()
-    return [
-        dbc.Col(kpi_card("STORAGE", used["storage"], TOTAL_CAPACITY["storage"], "GB"), md=4),
-        dbc.Col(kpi_card("RAM", used["ram"], TOTAL_CAPACITY["ram"], "GB"), md=4),
-        dbc.Col(kpi_card("CPU", used["cpu"], TOTAL_CAPACITY["cpu"], "CPU"), md=4),
-    ]
+Represents the starting point
 
-@app.callback(
-    Output("inventory-table","children"),
-    Input("inv-filter","value")
-)
-def filter_inventory(txt):
-    df = inventory_baseline()
-    if txt:
-        df = df[df["assetuniquename"].str.contains(txt, case=False)]
-    return dbc.Table.from_dataframe(df, striped=True, hover=True)
+Is never modified by daily operations
 
-# ================= RUN =================
-if __name__ == "__main__":
-    app.run(debug=True)
+
+🔹 Daily Changes (Events)
+
+Allocate / Deallocate happens daily
+
+Can affect:
+
+CPU
+
+RAM
+
+Storage
+
+One or all at the same time
+
+
+Can be:
+
+Manual (dashboard entry)
+
+Automatic (CSV picked daily at fixed time, e.g. 10 PM IST)
+
+
+
+🔹 Snapshot (Calculated Truth)
+
+Represents current used capacity
+
+Calculated from:
+
+Baseline + All Events
+
+Used by dashboard for fast and stable KPIs
+
+
+
+---
+
+3️⃣ What the Dashboard Must Do
+
+Dashboard should show:
+
+✅ KPI Cards
+
+For Storage, RAM, CPU:
+
+Total capacity (given by you)
+
+Used capacity (from snapshot)
+
+Free capacity
+
+% Used
+
+Visual alert when usage crosses threshold (e.g. 75%)
+
+
+✅ Capacity Trend
+
+Trend graph based on daily events
+
+Resource selector:
+
+Storage / RAM / CPU
+
+
+
+✅ Recent Events
+
+Table showing:
+
+Date & time
+
+Server
+
+Resource
+
+Allocate / Deallocate
+
+Value
+
+Source (Manual / CSV)
+
+
+Date filter
+
+
+
+---
+
+4️⃣ How Data Enters the System
+
+Manual
+
+User enters allocate / deallocate from dashboard
+
+Writes data to events table only
+
+
+Automatic (CSV)
+
+CSV placed in a folder
+
+Picked automatically at fixed time
+
+Same structure as manual
+
+Writes data to events table only
+
+
+👉 Manual and CSV both follow the same pipeline
+
+
+---
+
+5️⃣ Important Rules (Very Important)
+
+❌ Inventory is never modified by allocation/deallocation
+
+❌ Dashboard never writes to inventory
+
+✅ All daily changes go to events
+
+✅ Snapshot is the single source of truth for “current state”
+
+✅ Dashboard only reads data
+
+
+
+---
+
+📊 TABLES USED IN THIS PROJECT
+
+These tables were created after our project discussion and are used for the capacity dashboard layer.
+
+
+---
+
+1️⃣ server_capacity_master
+
+Purpose
+
+Stores total configured capacity
+
+Example:
+
+Total Storage
+
+Total RAM
+
+Total CPU
+
+
+Can also store reserved percentage (e.g. 30%)
+
+
+Role
+
+Read by dashboard
+
+Not updated frequently
+
+Configuration-level table
+
+
+
+---
+
+2️⃣ server_capacity_events
+
+Purpose
+
+Stores daily capacity changes
+
+This is the most important table
+
+
+What it contains
+
+Server name
+
+Resource type (CPU / RAM / Storage)
+
+Allocate or Deallocate
+
+Change value (+ / −)
+
+Source:
+
+Manual
+
+CSV
+
+
+Reason
+
+Timestamp
+
+
+Role
+
+Audit trail
+
+Trend calculation
+
+Input for snapshot calculation
+
+
+
+---
+
+3️⃣ server_capacity_snapshot
+
+Purpose
+
+Stores calculated capacity state
+
+Represents:
+
+> “Current used capacity at this point in time”
+
+
+
+
+What it contains
+
+Used storage
+
+Used RAM
+
+Used CPU
+
+Snapshot timestamp
+
+
+Role
+
+Drives KPI cards
+
+Makes dashboard fast and reliable
+
+Avoids recalculating everything on every page load
+
+
+
+---
+
+6️⃣ Final Architecture Summary
+
+Weekly Inventory (Baseline)
+        ↓
+(server_capacity_snapshot seeded once)
+
+Daily Allocate / Deallocate
+(Manual UI / CSV Auto Pickup)
+        ↓
+server_capacity_events
+        ↓
+Recalculation Job
+        ↓
+server_capacity_snapshot
+        ↓
+Dashboard (KPIs, Trend, Events)
+
+
+---
+
+7️⃣ One-Line Summary (Interview Ready)
+
+> “We treat inventory as a weekly baseline, track all daily capacity changes as events, compute snapshots for the current state, and use a dashboard to visualize real-time capacity without ever modifying the inventory.”
+
+
+
+
+---
+
+If you want, next I can:
+
+Convert this into official project documentation
+
+Convert this into interview explanation
+
+Or map this to real-world CMDB / capacity tools
+
+
+Just tell me what you want next.
