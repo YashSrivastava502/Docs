@@ -1,28 +1,29 @@
-# ================= DATABASE CONFIG =================
+# ---------- DATABASE ----------
 DB_CONFIG = {
     "host": "10.7.32.181",
     "port": 5432,
     "dbname": "GlobalInventory",
     "user": "postgres",
-    "password": "mc6Qld8x0910",
+    "password": "YOUR_PASSWORD"
 }
 
-# ================= TOTAL CAPACITY (TEMP) =================
-TOTAL_CAPACITY = {
+# ---------- CAPACITY TOTALS ----------
+CAPACITY = {
     "storage_gb": 5120,     # 5 TB
-    "ram_gb": 40000,
-    "cpu_cores": 20000,
+    "ram_gb": 40000,        # GB
+    "cpu_cores": 20000,     # cores
+    "reserved_pct": 0.30    # 30%
 }
 
-# ================= UI =================
-ALERT_THRESHOLD = 75
+# ---------- UI ----------
+ALERT_THRESHOLD = 75  # %
 
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 from dash import Dash, dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
-from config import DB_CONFIG, TOTAL_CAPACITY, ALERT_THRESHOLD
+from config import DB_CONFIG, CAPACITY, ALERT_THRESHOLD
 
 # ================= DB =================
 ENGINE = create_engine(
@@ -32,140 +33,160 @@ ENGINE = create_engine(
 )
 
 # ================= HELPERS =================
-def format_val(v, unit):
+def fmt(v, unit):
     if unit == "cpu":
         return f"{int(v):,} cores"
     return f"{v/1024:.2f} TB" if v >= 1024 else f"{int(v)} GB"
 
+def pct_color(p):
+    return "danger" if p >= ALERT_THRESHOLD else "success"
+
+def calc_capacity():
+    # Inventory baseline
+    inv = pd.read_sql("""
+        SELECT
+          COALESCE(SUM(totaldisk::numeric),0)               AS storage_used,
+          COALESCE(SUM(servermemory::numeric)/1024,0)       AS ram_used,
+          COALESCE(SUM(servercores::numeric),0)             AS cpu_used
+        FROM inventory
+    """, ENGINE)
+
+    # Events delta
+    ev = pd.read_sql("""
+        SELECT resource_type, COALESCE(SUM(change_value),0) AS delta
+        FROM server_capacity_events
+        GROUP BY resource_type
+    """, ENGINE)
+
+    used = {
+        "storage": float(inv.storage_used.iloc[0]),
+        "ram": float(inv.ram_used.iloc[0]),
+        "cpu": float(inv.cpu_used.iloc[0]),
+    }
+
+    for _, r in ev.iterrows():
+        if r.resource_type in used:
+            used[r.resource_type] += float(r.delta)
+
+    totals = {
+        "storage": CAPACITY["storage_gb"],
+        "ram": CAPACITY["ram_gb"],
+        "cpu": CAPACITY["cpu_cores"]
+    }
+
+    reserved = {k: totals[k] * CAPACITY["reserved_pct"] for k in totals}
+    usable = {k: totals[k] - reserved[k] for k in totals}
+    pct = {k: (used[k] / usable[k] * 100) if usable[k] else 0 for k in used}
+
+    return used, totals, reserved, usable, pct
+
+def kpi(title, used, total, reserved, usable, pct, unit):
+    return dbc.Card(
+        dbc.CardBody([
+            html.H6(title, className="text-muted"),
+            html.H4(fmt(used, unit), className=f"text-{pct_color(pct)}"),
+            html.Hr(),
+            html.P(f"Total: {fmt(total, unit)}"),
+            html.P(f"Reserved (30%): {fmt(reserved, unit)}"),
+            html.P(f"Usable: {fmt(usable, unit)}"),
+            html.Small(f"Used: {pct:.1f}%")
+        ]),
+        className="shadow-sm text-center"
+    )
+
 # ================= APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 app.title = "Server Capacity Dashboard"
 
-# ================= LAYOUT =================
 app.layout = dbc.Container(fluid=True, children=[
-
     html.H3("Server Capacity Dashboard", className="text-center my-3"),
 
     dbc.Tabs([
-
-        # ================= DASHBOARD TAB =================
+        # -------- DASHBOARD --------
         dbc.Tab(label="Dashboard", children=[
-            dbc.Row(id="kpi-row", className="mt-4"),
+            dbc.Row(id="kpis", className="mt-3"),
         ]),
 
-        # ================= EVENTS TAB =================
+        # -------- EVENTS --------
         dbc.Tab(label="Events", children=[
             dbc.Row([
                 dbc.Col([
-                    dbc.Input(id="server", placeholder="Server Name"),
+                    dbc.Input(id="server", placeholder="Server name"),
                     dcc.Dropdown(
                         id="resource",
                         options=[
-                            {"label": "Storage", "value": "storage"},
-                            {"label": "RAM", "value": "ram"},
-                            {"label": "CPU", "value": "cpu"},
+                            {"label":"Storage","value":"storage"},
+                            {"label":"RAM","value":"ram"},
+                            {"label":"CPU","value":"cpu"},
                         ],
-                        placeholder="Select Resource"
+                        placeholder="Resource"
                     ),
                     dcc.Dropdown(
                         id="action",
                         options=[
-                            {"label": "Allocate", "value": "ALLOCATE"},
-                            {"label": "Deallocate", "value": "DEALLOCATE"},
+                            {"label":"Allocate","value":"ALLOCATE"},
+                            {"label":"Deallocate","value":"DEALLOCATE"},
                         ],
                         placeholder="Action"
                     ),
-                    dbc.Input(id="value", type="number", placeholder="Value"),
+                    dbc.Input(id="value", type="number", placeholder="Value (+ / -)"),
                     dbc.Button("Submit", id="submit", color="primary", className="mt-2")
                 ], md=4),
 
                 dbc.Col([
                     html.Div(id="event-msg"),
-                    html.H5("Recent Events"),
+                    html.H5("Recent Events", className="mt-2"),
                     html.Div(id="events-table")
                 ], md=8)
-            ], className="mt-4")
+            ], className="mt-3")
         ]),
 
-        # ================= INVENTORY TAB =================
+        # -------- INVENTORY --------
         dbc.Tab(label="Inventory", children=[
-            html.H5("Inventory (Read Only)", className="mt-3"),
+            html.H5("Inventory (Read-only)", className="mt-3"),
             html.Div(id="inventory-table")
         ])
-
     ])
 ])
 
 # ================= CALLBACKS =================
-
-# KPI LOAD
-@app.callback(
-    Output("kpi-row", "children"),
-    Input("kpi-row", "id")
-)
+@app.callback(Output("kpis","children"), Input("kpis","id"))
 def load_kpis(_):
-    df = pd.read_sql("""
-        SELECT storage_used, ram_used, cpu_used
-        FROM server_capacity_snapshot
-        ORDER BY snapshot_time DESC
-        LIMIT 1
-    """, ENGINE)
-
-    if df.empty:
-        return dbc.Alert("No snapshot data found", color="warning")
-
-    row = df.iloc[0]
-
+    used, totals, reserved, usable, pct = calc_capacity()
     return [
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Storage"),
-            html.H4(format_val(row.storage_used, "storage"))
-        ])), md=4),
-
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("RAM"),
-            html.H4(format_val(row.ram_used, "ram"))
-        ])), md=4),
-
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("CPU"),
-            html.H4(format_val(row.cpu_used, "cpu"))
-        ])), md=4),
+        dbc.Col(kpi("STORAGE", used["storage"], totals["storage"],
+                    reserved["storage"], usable["storage"], pct["storage"], "gb"), md=4),
+        dbc.Col(kpi("RAM", used["ram"], totals["ram"],
+                    reserved["ram"], usable["ram"], pct["ram"], "gb"), md=4),
+        dbc.Col(kpi("CPU", used["cpu"], totals["cpu"],
+                    reserved["cpu"], usable["cpu"], pct["cpu"], "cpu"), md=4),
     ]
 
-# INSERT EVENT
 @app.callback(
-    Output("event-msg", "children"),
-    Input("submit", "n_clicks"),
-    State("server", "value"),
-    State("resource", "value"),
-    State("action", "value"),
-    State("value", "value"),
+    Output("event-msg","children"),
+    Input("submit","n_clicks"),
+    State("server","value"),
+    State("resource","value"),
+    State("action","value"),
+    State("value","value"),
     prevent_initial_call=True
 )
 def add_event(_, server, resource, action, value):
     if not all([server, resource, action, value]):
         return dbc.Alert("All fields required", color="danger")
 
-    with ENGINE.begin() as conn:
-        conn.execute(text("""
+    delta = float(value) if action == "ALLOCATE" else -abs(float(value))
+
+    with ENGINE.begin() as c:
+        c.execute(text("""
             INSERT INTO server_capacity_events
             (event_time, assetuniquename, resource_type, action, change_value, source)
             VALUES (NOW(), :s, :r, :a, :v, 'MANUAL')
-        """), {
-            "s": server,
-            "r": resource,
-            "a": action,
-            "v": value
-        })
+        """), {"s":server, "r":resource, "a":action, "v":delta})
 
-    return dbc.Alert("Event added successfully", color="success")
+    return dbc.Alert("Event added", color="success")
 
-# LOAD EVENTS
-@app.callback(
-    Output("events-table", "children"),
-    Input("submit", "n_clicks")
-)
+@app.callback(Output("events-table","children"), Input("submit","n_clicks"))
 def load_events(_):
     df = pd.read_sql("""
         SELECT event_time, assetuniquename, resource_type,
@@ -174,17 +195,16 @@ def load_events(_):
         ORDER BY event_time DESC
         LIMIT 10
     """, ENGINE)
+    if df.empty:
+        return dbc.Alert("No events yet", color="secondary")
+    return dbc.Table.from_dataframe(df, striped=True, hover=True)
 
-    return dbc.Table.from_dataframe(df, striped=True, bordered=True, hover=True)
-
-# LOAD INVENTORY
-@app.callback(
-    Output("inventory-table", "children"),
-    Input("inventory-table", "id")
-)
+@app.callback(Output("inventory-table","children"), Input("inventory-table","id"))
 def load_inventory(_):
     df = pd.read_sql("SELECT * FROM inventory LIMIT 100", ENGINE)
-    return dbc.Table.from_dataframe(df, striped=True, bordered=True, hover=True)
+    if df.empty:
+        return dbc.Alert("Inventory empty", color="secondary")
+    return dbc.Table.from_dataframe(df, striped=True, hover=True)
 
 # ================= RUN =================
 if __name__ == "__main__":
