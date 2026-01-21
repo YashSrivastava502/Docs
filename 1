@@ -1,66 +1,20 @@
-#!/usr/bin/env python3
-"""
-Recalculates server_capacity_snapshot from master + all historical events
-Run after ingestion or on fixed schedule
-"""
+from pathlib import Path
+from datetime import time
 
-import logging
-from datetime import datetime
-import pandas as pd
-from database import query_df, run_sql
+BASE_DIR = Path(__file__).resolve().parent
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("logs/snapshot_refresh.log"), logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+# Folders
+INCOMING_CSV_FOLDER = BASE_DIR / "incoming_csv"
+PROCESSED_CSV_FOLDER = BASE_DIR / "incoming_csv" / "processed"
+FAILED_CSV_FOLDER    = BASE_DIR / "incoming_csv" / "failed"
+LOG_DIR              = BASE_DIR / "logs"
 
-def refresh_snapshot():
-    logger.info("Refreshing snapshot")
+for folder in [INCOMING_CSV_FOLDER, PROCESSED_CSV_FOLDER, FAILED_CSV_FOLDER, LOG_DIR]:
+    folder.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # Get latest baseline
-        master = query_df("""
-            SELECT total_storage_gb, total_ram_gb, total_cpu_cores
-            FROM server_capacity_master
-            ORDER BY last_updated DESC LIMIT 1
-        """).iloc[0]
+# Database
+DB_CONNECTION_STRING = "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory"
 
-        # Sum all historical deltas
-        deltas = query_df("""
-            SELECT 
-                resource_type,
-                SUM(change_value) AS total_delta
-            FROM server_capacity_events
-            GROUP BY resource_type
-        """).set_index("resource_type")["total_delta"].to_dict()
-
-        used = {
-            "storage": master["total_storage_gb"] + deltas.get("storage", 0),
-            "ram":     master["total_ram_gb"]     + deltas.get("ram", 0),
-            "cpu":     master["total_cpu_cores"]  + deltas.get("cpu", 0),
-        }
-
-        # Safety: cannot be negative
-        used = {k: max(0, v) for k, v in used.items()}
-
-        # Insert new snapshot
-        run_sql("""
-            INSERT INTO server_capacity_snapshot
-            (storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time)
-            VALUES (:s, :r, :c, NOW())
-        """, {
-            "s": used["storage"],
-            "r": used["ram"],
-            "c": used["cpu"]
-        })
-
-        logger.info(f"New snapshot created → Storage: {used['storage']:.1f} GB | RAM: {used['ram']:.1f} GB | CPU: {used['cpu']:.0f} cores")
-
-    except Exception as e:
-        logger.error("Snapshot refresh failed", exc_info=True)
-
-
-if __name__ == "__main__":
-    refresh_snapshot()
+# CSV format expectations
+CSV_DATE_COLUMN = "date"           # users provide only YYYY-MM-DD
+EVENT_TIME_DEFAULT_HOUR = 23       # we set event_time to 23:59:59 of that day
