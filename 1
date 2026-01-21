@@ -1,34 +1,26 @@
-import os
-from pathlib import Path
-from datetime import time
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import QueuePool
+import pandas as pd
+from config import DB_URI
 
-# ──── Core paths ───────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-CSV_INCOMING_FOLDER = BASE_DIR / "incoming_csv"
-CSV_PROCESSED_FOLDER = BASE_DIR / "processed_csv"
-LOG_DIR = BASE_DIR / "logs"
+engine = create_engine(
+    DB_URI,
+    poolclass=QueuePool,
+    pool_size=8,
+    max_overflow=12,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={"application_name": "capacity-dashboard"}
+)
 
-CSV_INCOMING_FOLDER.mkdir(exist_ok=True)
-CSV_PROCESSED_FOLDER.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
+def get_connection():
+    return engine.connect()
 
-# ──── Database ─────────────────────────────────────────
-DB_URI = "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory"
+def run_sql(sql: str, params=None):
+    with get_connection() as conn:
+        conn.execute(text(sql), params or {})
+        conn.commit()
 
-# ──── Ingestion settings ───────────────────────────────
-EXPECTED_CSV_COLUMNS = [
-    "event_time",           # ISO format or parsable datetime
-    "assetuniquename",      # server name
-    "resource_type",        # storage | ram | cpu
-    "action",               # allocate | deallocate
-    "change_value",         # positive = allocate, negative = deallocate (or use action)
-    "source",               # manual | csv | api
-    "reason"
-]
-
-# Optional: if change_value is always positive and action determines sign
-USE_ACTION_FOR_SIGN = True
-
-# ──── Scheduling (for reference / cron comments)
-DAILY_INGEST_TIME = time(22, 0)     # 10 PM IST
-DAILY_SNAPSHOT_TIME = time(22, 30)
+def query_df(sql: str, params=None) -> pd.DataFrame:
+    with get_connection() as conn:
+        return pd.read_sql(text(sql), conn, params=params)
