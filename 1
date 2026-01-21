@@ -1,14 +1,100 @@
-from sqlalchemy import create_engine
-from config import DB_CONNECTION_STRING
-
-engine = create_engine(
-    DB_CONNECTION_STRING,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-    pool_recycle=1800,
-    connect_args={"application_name": "capacity-system"}
+#!/usr/bin/env python3
+import logging
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from dateutil.parser import parse
+from config import (
+    INCOMING_CSV_FOLDER, PROCESSED_CSV_FOLDER, FAILED_CSV_FOLDER,
+    CSV_DATE_COLUMN, EVENT_TIME_DEFAULT_HOUR
 )
+from database import get_engine
 
-def get_engine():
-    return engine
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("logs/ingest_csv.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+EXPECTED_REQUIRED = ["date", "assetuniquename", "resource_type", "action", "change_value"]
+
+def ingest_csv(file_path: Path):
+    logger.info(f"Processing {file_path.name}")
+
+    try:
+        df = pd.read_csv(file_path)
+
+        missing = [c for c in EXPECTED_REQUIRED if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing columns: {missing}")
+
+        # Convert date → event_time (end of day)
+        def to_event_time(d):
+            dt = parse(str(d).strip())
+            return dt.replace(hour=EVENT_TIME_DEFAULT_HOUR, minute=59, second=59)
+
+        df["event_time"] = df[CSV_DATE_COLUMN].apply(to_event_time)
+        df = df.drop(columns=[CSV_DATE_COLUMN])
+
+        # Normalize
+        df["resource_type"] = df["resource_type"].str.lower().str.strip()
+        df["action"] = df["action"].str.lower().str.strip()
+
+        # Apply sign based on action
+        def signed_change(row):
+            v = float(row["change_value"])
+            a = row["action"]
+            if a in ["allocate", "add"]:
+                return v
+            if a in ["deallocate", "remove", "release"]:
+                return -v
+            raise ValueError(f"Unknown action: {a}")
+
+        df["change_value"] = df.apply(signed_change, axis=1)
+
+        df["source"] = "csv"
+        df["inserted_at"] = datetime.utcnow()
+
+        # Select & order columns for table
+        columns = [
+            "event_time", "assetuniquename", "resource_type",
+            "action", "change_value", "source", "reason"
+        ]
+        df = df[[c for c in columns if c in df.columns or c == "reason"]]  # reason optional
+
+        df.to_sql(
+            "server_capacity_events",
+            get_engine(),
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=2000
+        )
+
+        logger.info(f"Inserted {len(df)} events from {file_path.name}")
+
+        # Archive
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = PROCESSED_CSV_FOLDER / f"{file_path.stem}_done_{ts}{file_path.suffix}"
+        file_path.rename(target)
+
+    except Exception as e:
+        logger.error(f"Failed {file_path.name}: {e}", exc_info=True)
+        failed_path = FAILED_CSV_FOLDER / file_path.name
+        file_path.rename(failed_path)
+        logger.info(f"Moved to failed: {failed_path}")
+
+
+def main():
+    logger.info("CSV ingestion started")
+    for ext in ["*.csv", "*.CSV"]:
+        for file in INCOMING_CSV_FOLDER.glob(ext):
+            ingest_csv(file)
+    logger.info("Ingestion finished")
+
+if __name__ == "__main__":
+    main()
