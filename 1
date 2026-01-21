@@ -1,106 +1,63 @@
-database:
-  host: 10.7.32.181
-  port: 5432
-  name: GlobalInventory
-  user: postgres
-  password: mc6Qld8x0910
+# ================= DATABASE CONFIG =================
+DB_CONFIG = {
+    "host": "10.7.32.181",
+    "port": 5432,
+    "dbname": "GlobalInventory",
+    "user": "postgres",
+    "password": "mc6Qld8x0910",
+}
 
-capacity:
-  storage_gb: 5120      # 5 TB
-  ram_gb: 40000
-  cpu_cores: 20000
+# ================= TOTAL CAPACITY (TEMP) =================
+TOTAL_CAPACITY = {
+    "storage_gb": 5120,     # 5 TB
+    "ram_gb": 40000,
+    "cpu_cores": 20000,
+}
 
-ui:
-  alert_threshold: 75
+# ================= UI =================
+ALERT_THRESHOLD = 75
 
 
-  
-import yaml
 import pandas as pd
-from datetime import date
-from sqlalchemy import create_engine
-from dash import Dash, html, dcc, Input, Output
+from sqlalchemy import create_engine, text
+from dash import Dash, dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
-import plotly.graph_objects as go
+from config import DB_CONFIG, TOTAL_CAPACITY, ALERT_THRESHOLD
 
-# ================= LOAD CONFIG =================
-with open("config.yaml") as f:
-    cfg = yaml.safe_load(f)
-
-DB = cfg["database"]
-CAP = cfg["capacity"]
-ALERT_PCT = cfg["ui"]["alert_threshold"]
-
+# ================= DB =================
 ENGINE = create_engine(
-    f"postgresql+psycopg2://{DB['user']}:{DB['password']}@{DB['host']}:{DB['port']}/{DB['name']}",
+    f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
+    f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}",
     pool_pre_ping=True
 )
 
-# ================= DATA FUNCTIONS =================
-def get_snapshot():
-    df = pd.read_sql("""
-        SELECT storage_used, ram_used, cpu_used
-        FROM server_capacity_snapshot
-        ORDER BY snapshot_time DESC
-        LIMIT 1
-    """, ENGINE)
-    return df.iloc[0] if not df.empty else None
-
-def get_events(start, end):
-    return pd.read_sql("""
-        SELECT event_time, assetuniquename, resource_type,
-               action, change_value, source, reason
-        FROM server_capacity_events
-        WHERE DATE(event_time) BETWEEN %s AND %s
-        ORDER BY event_time DESC
-    """, ENGINE, params=[start, end])
-
-def get_trend(resource):
-    return pd.read_sql("""
-        SELECT DATE(event_time) day, SUM(change_value) delta
-        FROM server_capacity_events
-        WHERE resource_type=%s
-        GROUP BY DATE(event_time)
-        ORDER BY day
-    """, ENGINE, params=[resource])
-
 # ================= HELPERS =================
-def fmt(v, unit):
-    if unit == "CPU":
+def format_val(v, unit):
+    if unit == "cpu":
         return f"{int(v):,} cores"
     return f"{v/1024:.2f} TB" if v >= 1024 else f"{int(v)} GB"
 
-def kpi(title, used, total, unit):
-    pct = (used / total) * 100 if total else 0
-    color = "danger" if pct >= ALERT_PCT else "success"
-
-    return dbc.Card(
-        dbc.CardBody([
-            html.H6(title, className="text-muted"),
-            html.H3(fmt(used, unit), className=f"text-{color}"),
-            html.Hr(),
-            html.P(f"Total: {fmt(total, unit)}"),
-            html.P(f"Free: {fmt(total-used, unit)}"),
-            html.Small(f"Used: {pct:.1f}%")
-        ]),
-        className="shadow-sm text-center"
-    )
-
 # ================= APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-app.title = "Capacity Dashboard"
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.title = "Server Capacity Dashboard"
 
+# ================= LAYOUT =================
 app.layout = dbc.Container(fluid=True, children=[
 
-    html.H2("Server Capacity Dashboard", className="text-center my-4"),
+    html.H3("Server Capacity Dashboard", className="text-center my-3"),
 
-    dbc.Row(id="kpis", className="mb-4"),
+    dbc.Tabs([
 
-    dbc.Row([
-        dbc.Col(
-            dbc.Card([
-                dbc.CardHeader("Capacity Trend"),
-                dbc.CardBody([
+        # ================= DASHBOARD TAB =================
+        dbc.Tab(label="Dashboard", children=[
+            dbc.Row(id="kpi-row", className="mt-4"),
+        ]),
+
+        # ================= EVENTS TAB =================
+        dbc.Tab(label="Events", children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Input(id="server", placeholder="Server Name"),
                     dcc.Dropdown(
                         id="resource",
                         options=[
@@ -108,75 +65,126 @@ app.layout = dbc.Container(fluid=True, children=[
                             {"label": "RAM", "value": "ram"},
                             {"label": "CPU", "value": "cpu"},
                         ],
-                        value="storage",
-                        clearable=False,
-                        style={"width": "200px"}
+                        placeholder="Select Resource"
                     ),
-                    dcc.Graph(id="trend")
-                ])
-            ]),
-            md=7
-        ),
+                    dcc.Dropdown(
+                        id="action",
+                        options=[
+                            {"label": "Allocate", "value": "ALLOCATE"},
+                            {"label": "Deallocate", "value": "DEALLOCATE"},
+                        ],
+                        placeholder="Action"
+                    ),
+                    dbc.Input(id="value", type="number", placeholder="Value"),
+                    dbc.Button("Submit", id="submit", color="primary", className="mt-2")
+                ], md=4),
 
-        dbc.Col(
-            dbc.Card([
-                dbc.CardHeader("Recent Events"),
-                dbc.CardBody([
-                    dcc.DatePickerRange(
-                        id="dates",
-                        start_date=date.today(),
-                        end_date=date.today()
-                    ),
-                    html.Div(id="events", className="mt-3")
-                ])
-            ]),
-            md=5
-        )
+                dbc.Col([
+                    html.Div(id="event-msg"),
+                    html.H5("Recent Events"),
+                    html.Div(id="events-table")
+                ], md=8)
+            ], className="mt-4")
+        ]),
+
+        # ================= INVENTORY TAB =================
+        dbc.Tab(label="Inventory", children=[
+            html.H5("Inventory (Read Only)", className="mt-3"),
+            html.Div(id="inventory-table")
+        ])
+
     ])
 ])
 
 # ================= CALLBACKS =================
+
+# KPI LOAD
 @app.callback(
-    Output("kpis", "children"),
-    Input("resource", "value")
+    Output("kpi-row", "children"),
+    Input("kpi-row", "id")
 )
 def load_kpis(_):
-    snap = get_snapshot()
-    if snap is None:
-        return dbc.Alert("No snapshot data available", color="warning")
+    df = pd.read_sql("""
+        SELECT storage_used, ram_used, cpu_used
+        FROM server_capacity_snapshot
+        ORDER BY snapshot_time DESC
+        LIMIT 1
+    """, ENGINE)
+
+    if df.empty:
+        return dbc.Alert("No snapshot data found", color="warning")
+
+    row = df.iloc[0]
 
     return [
-        dbc.Col(kpi("STORAGE", snap.storage_used, CAP["storage_gb"], "GB"), md=4),
-        dbc.Col(kpi("RAM", snap.ram_used, CAP["ram_gb"], "GB"), md=4),
-        dbc.Col(kpi("CPU", snap.cpu_used, CAP["cpu_cores"], "CPU"), md=4),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("Storage"),
+            html.H4(format_val(row.storage_used, "storage"))
+        ])), md=4),
+
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("RAM"),
+            html.H4(format_val(row.ram_used, "ram"))
+        ])), md=4),
+
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6("CPU"),
+            html.H4(format_val(row.cpu_used, "cpu"))
+        ])), md=4),
     ]
 
+# INSERT EVENT
 @app.callback(
-    Output("trend", "figure"),
-    Input("resource", "value")
+    Output("event-msg", "children"),
+    Input("submit", "n_clicks"),
+    State("server", "value"),
+    State("resource", "value"),
+    State("action", "value"),
+    State("value", "value"),
+    prevent_initial_call=True
 )
-def load_trend_graph(res):
-    df = get_trend(res)
-    fig = go.Figure()
-    if not df.empty:
-        fig.add_trace(go.Scatter(
-            x=df["day"],
-            y=df["delta"].cumsum(),
-            mode="lines+markers"
-        ))
-    fig.update_layout(height=320, margin=dict(l=20,r=20,t=20,b=20))
-    return fig
+def add_event(_, server, resource, action, value):
+    if not all([server, resource, action, value]):
+        return dbc.Alert("All fields required", color="danger")
 
+    with ENGINE.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO server_capacity_events
+            (event_time, assetuniquename, resource_type, action, change_value, source)
+            VALUES (NOW(), :s, :r, :a, :v, 'MANUAL')
+        """), {
+            "s": server,
+            "r": resource,
+            "a": action,
+            "v": value
+        })
+
+    return dbc.Alert("Event added successfully", color="success")
+
+# LOAD EVENTS
 @app.callback(
-    Output("events", "children"),
-    Input("dates", "start_date"),
-    Input("dates", "end_date")
+    Output("events-table", "children"),
+    Input("submit", "n_clicks")
 )
-def load_events_table(s, e):
-    df = get_events(s, e)
-    if df.empty:
-        return dbc.Alert("No events found", color="secondary")
-    return dbc.Table.from_dataframe(df, striped=True, hover=True, size="sm")
+def load_events(_):
+    df = pd.read_sql("""
+        SELECT event_time, assetuniquename, resource_type,
+               action, change_value, source
+        FROM server_capacity_events
+        ORDER BY event_time DESC
+        LIMIT 10
+    """, ENGINE)
+
+    return dbc.Table.from_dataframe(df, striped=True, bordered=True, hover=True)
+
+# LOAD INVENTORY
+@app.callback(
+    Output("inventory-table", "children"),
+    Input("inventory-table", "id")
+)
+def load_inventory(_):
+    df = pd.read_sql("SELECT * FROM inventory LIMIT 100", ENGINE)
+    return dbc.Table.from_dataframe(df, striped=True, bordered=True, hover=True)
 
 # ================= RUN =================
 if __name__ == "__main__":
