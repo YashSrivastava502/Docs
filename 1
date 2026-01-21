@@ -1,225 +1,336 @@
 # config.py
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
+
 DB_URI = "postgresql+psycopg2://postgres:mc6Qld8x0910@10.7.32.181:5432/GlobalInventory"
+
+INCOMING_FOLDER = BASE_DIR / "incoming_csv"
+PROCESSED_FOLDER = INCOMING_FOLDER / "processed"
+FAILED_FOLDER = INCOMING_FOLDER / "failed"
+
+for folder in [INCOMING_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
+    folder.mkdir(exist_ok=True)
+
+# CSV columns we expect from user (date only)
+CSV_REQUIRED_COLUMNS = [
+    "date",               # YYYY-MM-DD
+    "assetuniquename",
+    "resource_type",
+    "action",
+    "change_value"
+]
+
 
 
 # main.py
+import logging
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
+from dateutil.parser import parse
+from pathlib import Path
 from sqlalchemy import create_engine, text
-from dash import Dash, html, dcc, Input, Output
+
+import dash
+from dash import Dash, html, dcc, Input, Output, State, callback
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 
-# ─── Import config ───────────────────────────────────────
-from config import DB_URI
-
-# ─── Database ────────────────────────────────────────────
-engine = create_engine(
+from config import (
     DB_URI,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10
+    INCOMING_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER,
+    CSV_REQUIRED_COLUMNS
 )
 
-# ─── Data loading functions ──────────────────────────────
-def get_latest_snapshot():
-    q = """
-    SELECT storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time
-    FROM server_capacity_snapshot
-    ORDER BY snapshot_time DESC LIMIT 1
-    """
-    df = pd.read_sql(q, engine)
+# ─── Logging ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(levelname)-8s  %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("capacity")
+
+# ─── Database ────────────────────────────────────────────
+engine = create_engine(DB_URI, pool_pre_ping=True, pool_size=5, max_overflow=10)
+
+# ─── CSV Ingestion Logic ─────────────────────────────────
+def ingest_all_waiting_csvs():
+    messages = []
+    count_success = 0
+    count_failed = 0
+
+    for file_path in list(INCOMING_FOLDER.glob("*.csv")) + list(INCOMING_FOLDER.glob("*.CSV")):
+        try:
+            df = pd.read_csv(file_path)
+
+            missing = [c for c in CSV_REQUIRED_COLUMNS if c not in df.columns]
+            if missing:
+                raise ValueError(f"Missing columns: {', '.join(missing)}")
+
+            # date → event_time (end of day)
+            def parse_to_eod(d):
+                try:
+                    dt = parse(str(d).strip())
+                    return dt.replace(hour=23, minute=59, second=59)
+                except:
+                    raise ValueError(f"Cannot parse date: {d}")
+
+            df["event_time"] = df["date"].apply(parse_to_eod)
+            df = df.drop(columns=["date"])
+
+            # Normalize
+            df["resource_type"] = df["resource_type"].astype(str).str.lower().str.strip()
+            df["action"] = df["action"].astype(str).str.lower().str.strip()
+
+            # Apply sign
+            def get_signed_value(row):
+                val = float(row["change_value"])
+                act = row["action"]
+                if act in ["allocate", "add"]:
+                    return val
+                if act in ["deallocate", "remove", "release"]:
+                    return -val
+                raise ValueError(f"Unknown action: {act}")
+
+            df["change_value"] = df.apply(get_signed_value, axis=1)
+
+            # Metadata
+            df["source"] = "csv"
+            df["inserted_at"] = datetime.utcnow()
+
+            # Final columns
+            final_cols = [
+                "event_time", "assetuniquename", "resource_type",
+                "action", "change_value", "source", "reason"
+            ]
+            df = df[[c for c in final_cols if c in df.columns]]
+
+            # Insert
+            df.to_sql("server_capacity_events", engine, if_exists="append", index=False, method="multi")
+
+            count_success += len(df)
+
+            # Move file
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = PROCESSED_FOLDER / f"{file_path.stem}_done_{ts}{file_path.suffix}"
+            file_path.rename(target)
+            logger.info(f"Processed {file_path.name} → {len(df)} rows")
+
+            messages.append(f"✓ {file_path.name} ({len(df)} rows)")
+
+        except Exception as e:
+            logger.error(f"Failed {file_path.name}: {str(e)}")
+            failed_path = FAILED_FOLDER / file_path.name
+            file_path.rename(failed_path)
+            count_failed += 1
+            messages.append(f"✗ {file_path.name} – {str(e)[:60]}...")
+
+    summary = f"Ingestion complete: {count_success} rows added, {count_failed} files failed"
+    return summary + "\n" + "\n".join(messages) if messages else summary
+
+
+# ─── Dashboard Data Loaders ──────────────────────────────
+def get_snapshot():
+    df = pd.read_sql("""
+        SELECT storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time
+        FROM server_capacity_snapshot
+        ORDER BY snapshot_time DESC LIMIT 1
+    """, engine)
     if df.empty:
-        return pd.Series({
-            'storage_used_gb': 0.0,
-            'ram_used_gb': 0.0,
-            'cpu_used_cores': 0.0,
-            'snapshot_time': None
-        })
+        return pd.Series({"storage_used_gb":0, "ram_used_gb":0, "cpu_used_cores":0, "snapshot_time":None})
     return df.iloc[0]
 
 
 def get_totals():
-    q = """
-    SELECT total_storage_gb, total_ram_gb, total_cpu_cores
-    FROM server_capacity_master
-    ORDER BY last_updated DESC LIMIT 1
-    """
-    df = pd.read_sql(q, engine)
+    df = pd.read_sql("""
+        SELECT total_storage_gb, total_ram_gb, total_cpu_cores
+        FROM server_capacity_master
+        ORDER BY last_updated DESC LIMIT 1
+    """, engine)
     if df.empty:
-        raise RuntimeError("No data in server_capacity_master")
+        raise ValueError("No master record found")
     return df.iloc[0]
 
 
-def load_trend(resource):
-    q = """
-    SELECT DATE(event_time) AS day, SUM(change_value) AS net
-    FROM server_capacity_events
-    WHERE resource_type = %s
-    GROUP BY day
-    ORDER BY day
-    """
-    df = pd.read_sql(q, engine, params=(resource,))
+def get_trend(resource):
+    df = pd.read_sql("""
+        SELECT DATE(event_time) day, SUM(change_value) net
+        FROM server_capacity_events
+        WHERE resource_type = %s
+        GROUP BY day ORDER BY day
+    """, engine, params=(resource,))
     if df.empty:
         return pd.DataFrame()
-    df['cumulative'] = df['net'].cumsum()
+    df["cumulative"] = df["net"].cumsum()
     return df
 
 
-def load_events(start, end):
-    q = text("""
-    SELECT event_time, assetuniquename AS server, resource_type,
-           action, change_value, source, reason
-    FROM server_capacity_events
-    WHERE event_time::date BETWEEN :s AND :e
-    ORDER BY event_time DESC
-    """)
-    return pd.read_sql(q, engine, params={"s": start, "e": end})
+def get_events(start, end):
+    if not start or not end:
+        return pd.DataFrame()
+    df = pd.read_sql(text("""
+        SELECT event_time, assetuniquename server, resource_type, action,
+               change_value, source, reason
+        FROM server_capacity_events
+        WHERE event_time::date BETWEEN :s AND :e
+        ORDER BY event_time DESC
+    """), engine, params={"s": start, "e": end})
+    return df
 
 
 # ─── Formatters ──────────────────────────────────────────
 def fmt_gb(v):
-    return f"{v/1024:.2f} TB" if v >= 1024 else f"{int(v):,} GB"
+    if v >= 1024:
+        return f"{v/1024:.2f} TB"
+    return f"{int(v):,} GB"
 
 
 def fmt_cores(v):
-    return f"{int(v):,} cores"
+    return f"{int(round(v)):,} cores"
 
 
-def color_for_pct(pct):
+def usage_color(pct):
     if pct >= 85: return "danger"
     if pct >= 70: return "warning"
     return "success"
 
 
-def kpi_card(title, used, total, fmt_func, unit=""):
+def kpi_card(title, used, total, fmt_func):
     free = total - used
     pct = used / total * 100 if total > 0 else 0
-    col = color_for_pct(pct)
+    color = usage_color(pct)
 
-    return dbc.Card(
+    return dbc.Card([
         dbc.CardBody([
-            html.H6(title, className="text-muted"),
-            html.H4(fmt_func(used), className=f"text-{col}"),
-            html.Hr(),
-            html.Small(f"Total: {fmt_func(total)}"),
+            html.H6(title, className="text-muted mb-1"),
+            html.H4(fmt_func(used), className=f"text-{color}"),
+            html.Hr(className="my-2"),
+            html.Small(f"Total: {fmt_func(total)}  •  Free: {fmt_func(free)}"),
             html.Br(),
-            html.Small(f"Free:  {fmt_func(free)}"),
-            html.Br(),
-            html.Small(f"{pct:.1f}% used")
-        ]),
-        className="text-center shadow-sm"
-    )
+            html.Small(f"{pct:.1f}% used", className="fw-bold")
+        ])
+    ], className="shadow text-center")
 
 
-# ─── Dash app ────────────────────────────────────────────
+# ─── Dash App ────────────────────────────────────────────
 app = Dash(__name__, external_stylesheets=[dbc.themes.LUX])
 app.title = "Capacity Dashboard"
 
-app.layout = dbc.Container([
-    html.H2("Server Capacity Dashboard", className="text-center my-4"),
+app.layout = dbc.Container(fluid=True, className="p-4", children=[
 
-    html.Div(id="snapshot-time", className="text-center text-muted mb-4 small"),
+    html.H2("Server Capacity Dashboard", className="text-center mb-4"),
 
-    dbc.Row(id="kpis", className="mb-5"),
+    html.Div(id="snapshot-info", className="text-center text-muted mb-3 small"),
+
+    dbc.Row(id="kpi-row", className="mb-5"),
 
     dbc.Row([
         dbc.Col(md=7, children=dbc.Card([
-            dbc.CardHeader([
-                "Trend   ",
-                dcc.Dropdown(
-                    id="res",
-                    options=[
-                        {"label": "Storage", "value": "storage"},
-                        {"label": "RAM",     "value": "ram"},
-                        {"label": "CPU",     "value": "cpu"}
-                    ],
-                    value="storage",
-                    clearable=False,
-                    style={"width": "180px", "display": "inline-block"}
-                )
-            ]),
-            dbc.CardBody(dcc.Graph(id="graph", style={"height": "360px"}))
+            dbc.CardHeader(
+                html.Div([
+                    html.Span("Capacity Trend", className="me-3"),
+                    dcc.Dropdown(
+                        id="resource-dd",
+                        options=[
+                            {"label": "Storage", "value": "storage"},
+                            {"label": "RAM", "value": "ram"},
+                            {"label": "CPU", "value": "cpu"}
+                        ],
+                        value="storage",
+                        clearable=False,
+                        style={"width": "200px", "display": "inline-block"}
+                    )
+                ], className="d-flex align-items-center")
+            ),
+            dbc.CardBody(dcc.Graph(id="trend-graph", style={"height": "380px"}))
         ])),
 
         dbc.Col(md=5, children=dbc.Card([
-            dbc.CardHeader("Recent Events"),
+            dbc.CardHeader("Recent Events + Ingestion"),
             dbc.CardBody([
                 dcc.DatePickerRange(
-                    id="daterange",
+                    id="date-range",
                     start_date=date.today(),
-                    end_date=date.today()
+                    end_date=date.today(),
+                    display_format="D MMM YYYY"
                 ),
-                html.Div(id="eventstable", className="mt-3")
+                html.Div(id="events-div", className="mt-3"),
+
+                html.Hr(className="my-4"),
+
+                html.Button("Import All Waiting CSVs", id="import-btn", color="primary", className="mb-2"),
+                html.Div(id="import-result", className="mt-2 small pre-wrap")
             ])
         ]))
-    ], className="g-3")   # ← using g-3 instead of gutter=4 (compatible with older dbc)
-], fluid=True, className="p-4")
+    ])
+])
 
 
 # ─── Callbacks ───────────────────────────────────────────
-@app.callback(
-    Output("snapshot-time", "children"),
-    Input("res", "value")   # just trigger
+@callback(
+    Output("snapshot-info", "children"),
+    Input("resource-dd", "value")
 )
-def show_snapshot_time(_):
-    s = get_latest_snapshot()
+def show_snapshot_ts(_):
+    s = get_snapshot()
     if s["snapshot_time"] is None:
-        return "No snapshot available"
-    return f"Snapshot as of: {pd.Timestamp(s['snapshot_time']).strftime('%d %b %Y  %H:%M:%S')}"
+        return "No snapshot available yet"
+    return f"Current snapshot: {pd.Timestamp(s['snapshot_time']).strftime('%d %b %Y  %H:%M:%S')}"
 
 
-@app.callback(
-    Output("kpis", "children"),
-    Input("snapshot-time", "children")
+@callback(
+    Output("kpi-row", "children"),
+    Input("snapshot-info", "children")
 )
 def update_kpis(_):
-    s = get_latest_snapshot()
+    s = get_snapshot()
     t = get_totals()
-    return dbc.Row([
+    return [
         dbc.Col(kpi_card("STORAGE", s["storage_used_gb"],   t["total_storage_gb"],   fmt_gb), md=4),
         dbc.Col(kpi_card("RAM",     s["ram_used_gb"],       t["total_ram_gb"],       fmt_gb), md=4),
         dbc.Col(kpi_card("CPU",     s["cpu_used_cores"],    t["total_cpu_cores"],    fmt_cores), md=4),
-    ], className="g-3")
+    ]
 
 
-@app.callback(
-    Output("graph", "figure"),
-    Input("res", "value")
+@callback(
+    Output("trend-graph", "figure"),
+    Input("resource-dd", "value")
 )
-def update_graph(resource):
-    df = load_trend(resource)
+def update_trend(res):
+    df = get_trend(res)
     fig = go.Figure()
-
     if not df.empty:
-        fig.add_trace(go.Scatter(
-            x=df["day"], y=df["cumulative"],
-            mode="lines+markers", line=dict(width=2.5)
-        ))
-
-    fig.update_layout(
-        height=360, margin=dict(l=40,r=20,t=10,b=50),
-        xaxis_title="Date", yaxis_title="Cumulative net change"
-    )
-
+        fig.add_trace(go.Scatter(x=df["day"], y=df["cumulative"], mode="lines+markers"))
+    fig.update_layout(height=380, margin=dict(l=40,r=20,t=20,b=50),
+                      xaxis_title="Date", yaxis_title="Cumulative net change")
     return fig
 
 
-@app.callback(
-    Output("eventstable", "children"),
-    Input("daterange", "start_date"),
-    Input("daterange", "end_date")
+@callback(
+    Output("events-div", "children"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date")
 )
-def update_table(s, e):
-    if not s or not e:
-        return html.Div("Select date range", className="text-muted")
-    df = load_events(s, e)
+def show_events(s, e):
+    df = get_events(s, e)
     if df.empty:
-        return html.Div("No events in this period", className="alert alert-secondary")
-    return dbc.Table.from_dataframe(
-        df, striped=True, hover=True, size="sm", responsive=True
-    )
+        return dbc.Alert("No events found", color="secondary", className="mt-2")
+    return dbc.Table.from_dataframe(df, striped=True, hover=True, size="sm")
+
+
+@callback(
+    Output("import-result", "children"),
+    Input("import-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def run_ingestion(n):
+    if n is None:
+        return ""
+    result_text = ingest_all_waiting_csvs()
+    return dbc.Alert(result_text, color="info" if "failed" not in result_text.lower() else "warning", className="mt-2")
 
 
 if __name__ == '__main__':
+    logger.info("Starting dashboard + ingestion tool")
     app.run(debug=True, host="0.0.0.0", port=8050)
