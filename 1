@@ -1,100 +1,65 @@
 #!/usr/bin/env python3
 import logging
 import pandas as pd
-from pathlib import Path
 from datetime import datetime
-from dateutil.parser import parse
-from config import (
-    INCOMING_CSV_FOLDER, PROCESSED_CSV_FOLDER, FAILED_CSV_FOLDER,
-    CSV_DATE_COLUMN, EVENT_TIME_DEFAULT_HOUR
-)
 from database import get_engine
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("logs/ingest_csv.log"),
+        logging.FileHandler("logs/snapshot_refresh.log"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-EXPECTED_REQUIRED = ["date", "assetuniquename", "resource_type", "action", "change_value"]
-
-def ingest_csv(file_path: Path):
-    logger.info(f"Processing {file_path.name}")
+def refresh():
+    logger.info("Refreshing snapshot")
 
     try:
-        df = pd.read_csv(file_path)
+        engine = get_engine()
 
-        missing = [c for c in EXPECTED_REQUIRED if c not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
+        # Latest baseline
+        master = pd.read_sql("""
+            SELECT total_storage_gb, total_ram_gb, total_cpu_cores
+            FROM server_capacity_master
+            ORDER BY last_updated DESC LIMIT 1
+        """, engine).iloc[0]
 
-        # Convert date → event_time (end of day)
-        def to_event_time(d):
-            dt = parse(str(d).strip())
-            return dt.replace(hour=EVENT_TIME_DEFAULT_HOUR, minute=59, second=59)
+        # All-time net deltas
+        deltas = pd.read_sql("""
+            SELECT resource_type, SUM(change_value) AS delta
+            FROM server_capacity_events
+            GROUP BY resource_type
+        """, engine).set_index("resource_type")["delta"].to_dict()
 
-        df["event_time"] = df[CSV_DATE_COLUMN].apply(to_event_time)
-        df = df.drop(columns=[CSV_DATE_COLUMN])
+        used_storage = master["total_storage_gb"] + deltas.get("storage", 0)
+        used_ram     = master["total_ram_gb"]     + deltas.get("ram",     0)
+        used_cpu     = master["total_cpu_cores"]  + deltas.get("cpu",     0)
 
-        # Normalize
-        df["resource_type"] = df["resource_type"].str.lower().str.strip()
-        df["action"] = df["action"].str.lower().str.strip()
+        used_storage = max(0, used_storage)
+        used_ram     = max(0, used_ram)
+        used_cpu     = max(0, used_cpu)
 
-        # Apply sign based on action
-        def signed_change(row):
-            v = float(row["change_value"])
-            a = row["action"]
-            if a in ["allocate", "add"]:
-                return v
-            if a in ["deallocate", "remove", "release"]:
-                return -v
-            raise ValueError(f"Unknown action: {a}")
+        with engine.connect() as conn:
+            conn.execute("""
+                INSERT INTO server_capacity_snapshot
+                (storage_used_gb, ram_used_gb, cpu_used_cores, snapshot_time)
+                VALUES (%s, %s, %s, NOW())
+            """, (used_storage, used_ram, used_cpu))
+            conn.commit()
 
-        df["change_value"] = df.apply(signed_change, axis=1)
-
-        df["source"] = "csv"
-        df["inserted_at"] = datetime.utcnow()
-
-        # Select & order columns for table
-        columns = [
-            "event_time", "assetuniquename", "resource_type",
-            "action", "change_value", "source", "reason"
-        ]
-        df = df[[c for c in columns if c in df.columns or c == "reason"]]  # reason optional
-
-        df.to_sql(
-            "server_capacity_events",
-            get_engine(),
-            if_exists="append",
-            index=False,
-            method="multi",
-            chunksize=2000
+        logger.info(
+            f"Snapshot updated → "
+            f"Storage: {used_storage:,.1f} GB | "
+            f"RAM: {used_ram:,.1f} GB | "
+            f"CPU: {used_cpu:,.0f} cores"
         )
 
-        logger.info(f"Inserted {len(df)} events from {file_path.name}")
-
-        # Archive
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        target = PROCESSED_CSV_FOLDER / f"{file_path.stem}_done_{ts}{file_path.suffix}"
-        file_path.rename(target)
-
     except Exception as e:
-        logger.error(f"Failed {file_path.name}: {e}", exc_info=True)
-        failed_path = FAILED_CSV_FOLDER / file_path.name
-        file_path.rename(failed_path)
-        logger.info(f"Moved to failed: {failed_path}")
+        logger.error("Snapshot refresh failed", exc_info=True)
 
-
-def main():
-    logger.info("CSV ingestion started")
-    for ext in ["*.csv", "*.CSV"]:
-        for file in INCOMING_CSV_FOLDER.glob(ext):
-            ingest_csv(file)
-    logger.info("Ingestion finished")
 
 if __name__ == "__main__":
-    main()
+    refresh()
