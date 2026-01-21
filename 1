@@ -1,6 +1,8 @@
+import base64, io
 import pandas as pd
+import plotly.express as px
 from sqlalchemy import create_engine, text
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
 from config import DB_CONFIG, CAPACITY, ALERT_THRESHOLD
 
@@ -17,64 +19,89 @@ def fmt(v, unit):
         return f"{int(v):,} cores"
     return f"{v/1024:.2f} TB" if v >= 1024 else f"{int(v)} GB"
 
-def pct_color(p):
+def color(p):
     return "danger" if p >= ALERT_THRESHOLD else "success"
 
-# ================= CORE FIXED CALCULATION =================
+# ================= CORE CALC =================
 def calc_capacity():
-    # ---- SAFE inventory baseline (TEXT-safe) ----
     inv = pd.read_sql("""
         SELECT
-          COALESCE(SUM(NULLIF(totaldisk,'')::numeric),0)          AS storage_used,
-          COALESCE(SUM(NULLIF(servermemory,'')::numeric)/1024,0) AS ram_used,
-          COALESCE(SUM(NULLIF(servercores,'')::numeric),0)        AS cpu_used
+          COALESCE(SUM(NULLIF(totaldisk,'')::numeric),0) AS storage,
+          COALESCE(SUM(NULLIF(servermemory,'')::numeric)/1024,0) AS ram,
+          COALESCE(SUM(NULLIF(servercores,'')::numeric),0) AS cpu
         FROM inventory
     """, ENGINE)
 
-    # ---- SAFE events delta ----
     ev = pd.read_sql("""
-        SELECT resource_type, COALESCE(SUM(change_value),0) AS delta
+        SELECT lower(resource_type) r, COALESCE(SUM(change_value),0) v
         FROM server_capacity_events
-        GROUP BY resource_type
+        GROUP BY lower(resource_type)
     """, ENGINE)
 
     used = {
-        "storage": float(inv.storage_used.iloc[0]),
-        "ram": float(inv.ram_used.iloc[0]),
-        "cpu": float(inv.cpu_used.iloc[0]),
+        "storage": float(inv.storage[0]),
+        "ram": float(inv.ram[0]),
+        "cpu": float(inv.cpu[0]),
     }
 
-    # ---- NORMALIZE resource_type (FIX) ----
     for _, r in ev.iterrows():
-        key = str(r.resource_type).strip().lower()
-        if key in used:
-            used[key] += float(r.delta)
+        if r.r in used:
+            used[r.r] += float(r.v)
 
-    totals = {
+    total = {
         "storage": CAPACITY["storage_gb"],
         "ram": CAPACITY["ram_gb"],
         "cpu": CAPACITY["cpu_cores"]
     }
 
-    reserved = {k: totals[k] * CAPACITY["reserved_pct"] for k in totals}
-    usable = {k: totals[k] - reserved[k] for k in totals}
+    reserved = {k: total[k] * CAPACITY["reserved_pct"] for k in total}
+    usable = {k: total[k] - reserved[k] for k in total}
     pct = {k: (used[k] / usable[k] * 100) if usable[k] else 0 for k in used}
 
-    return used, totals, reserved, usable, pct
+    return used, total, reserved, usable, pct
 
 def kpi(title, used, total, reserved, usable, pct, unit):
     return dbc.Card(
         dbc.CardBody([
-            html.H6(title, className="text-muted"),
-            html.H4(fmt(used, unit), className=f"text-{pct_color(pct)}"),
-            html.Hr(),
+            html.H6(title),
+            html.H3(fmt(used, unit), className=f"text-{color(pct)}"),
             html.P(f"Total: {fmt(total, unit)}"),
             html.P(f"Reserved (30%): {fmt(reserved, unit)}"),
             html.P(f"Usable: {fmt(usable, unit)}"),
             html.Small(f"Used: {pct:.1f}%")
         ]),
-        className="shadow-sm text-center"
+        className="shadow text-center"
     )
+
+# ================= TREND =================
+def build_trend(resource):
+    base = pd.read_sql("""
+        SELECT
+          COALESCE(SUM(NULLIF(totaldisk,'')::numeric),0) AS storage,
+          COALESCE(SUM(NULLIF(servermemory,'')::numeric)/1024,0) AS ram,
+          COALESCE(SUM(NULLIF(servercores,'')::numeric),0) AS cpu
+        FROM inventory
+    """, ENGINE)
+
+    baseline = float(base[resource][0])
+
+    df = pd.read_sql("""
+        SELECT DATE(event_time) d, SUM(change_value) v
+        FROM server_capacity_events
+        WHERE lower(resource_type)=:r
+        GROUP BY DATE(event_time)
+        ORDER BY d
+    """, ENGINE, params={"r":resource})
+
+    if df.empty:
+        return px.line(title="No trend data yet")
+
+    df["used"] = baseline + df["v"].cumsum()
+
+    fig = px.line(df, x="d", y="used", markers=True,
+                  title=f"{resource.upper()} Usage Trend")
+    fig.update_layout(xaxis_title="Date", yaxis_title="Used")
+    return fig
 
 # ================= APP =================
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
@@ -84,18 +111,30 @@ app.layout = dbc.Container(fluid=True, children=[
     html.H3("Server Capacity Dashboard", className="text-center my-3"),
 
     dbc.Tabs([
-        # -------- DASHBOARD --------
         dbc.Tab(label="Dashboard", children=[
             dbc.Row(id="kpis", className="mt-3"),
+            html.Hr(),
+            dcc.Dropdown(
+                id="trend-resource",
+                options=[
+                    {"label":"Storage","value":"storage"},
+                    {"label":"RAM","value":"ram"},
+                    {"label":"CPU","value":"cpu"},
+                ],
+                value="storage",
+                clearable=False
+            ),
+            dcc.Graph(id="trend-graph"),
+            html.Hr(),
+            html.H5("Recent Events"),
+            html.Div(id="events-table")
         ]),
 
-        # -------- EVENTS --------
         dbc.Tab(label="Events", children=[
             dbc.Row([
                 dbc.Col([
                     dbc.Input(id="server", placeholder="Server name"),
-                    dcc.Dropdown(
-                        id="resource",
+                    dcc.Dropdown(id="resource",
                         options=[
                             {"label":"Storage","value":"storage"},
                             {"label":"RAM","value":"ram"},
@@ -103,8 +142,7 @@ app.layout = dbc.Container(fluid=True, children=[
                         ],
                         placeholder="Resource"
                     ),
-                    dcc.Dropdown(
-                        id="action",
+                    dcc.Dropdown(id="action",
                         options=[
                             {"label":"Allocate","value":"ALLOCATE"},
                             {"label":"Deallocate","value":"DEALLOCATE"},
@@ -112,20 +150,16 @@ app.layout = dbc.Container(fluid=True, children=[
                         placeholder="Action"
                     ),
                     dbc.Input(id="value", type="number", placeholder="Value"),
-                    dbc.Button("Submit", id="submit", color="primary", className="mt-2")
+                    dbc.Button("Submit", id="submit", color="primary", className="mt-2"),
+                    html.Div(id="msg", className="mt-2")
                 ], md=4),
 
-                dbc.Col([
-                    html.Div(id="event-msg"),
-                    html.H5("Recent Events", className="mt-2"),
-                    html.Div(id="events-table")
-                ], md=8)
+                dbc.Col(html.Div(id="events-table-2"), md=8)
             ], className="mt-3")
         ]),
 
-        # -------- INVENTORY --------
         dbc.Tab(label="Inventory", children=[
-            html.H5("Inventory (Read-only)", className="mt-3"),
+            html.H5("Inventory (Read Only)", className="mt-3"),
             html.Div(id="inventory-table")
         ])
     ])
@@ -134,18 +168,22 @@ app.layout = dbc.Container(fluid=True, children=[
 # ================= CALLBACKS =================
 @app.callback(Output("kpis","children"), Input("kpis","id"))
 def load_kpis(_):
-    used, totals, reserved, usable, pct = calc_capacity()
+    u,t,r,us,p = calc_capacity()
     return [
-        dbc.Col(kpi("STORAGE", used["storage"], totals["storage"],
-                    reserved["storage"], usable["storage"], pct["storage"], "gb"), md=4),
-        dbc.Col(kpi("RAM", used["ram"], totals["ram"],
-                    reserved["ram"], usable["ram"], pct["ram"], "gb"), md=4),
-        dbc.Col(kpi("CPU", used["cpu"], totals["cpu"],
-                    reserved["cpu"], usable["cpu"], pct["cpu"], "cpu"), md=4),
+        dbc.Col(kpi("STORAGE",u["storage"],t["storage"],r["storage"],us["storage"],p["storage"],"gb"),md=4),
+        dbc.Col(kpi("RAM",u["ram"],t["ram"],r["ram"],us["ram"],p["ram"],"gb"),md=4),
+        dbc.Col(kpi("CPU",u["cpu"],t["cpu"],r["cpu"],us["cpu"],p["cpu"],"cpu"),md=4),
     ]
 
+@app.callback(Output("trend-graph","figure"),
+              Input("trend-resource","value"))
+def update_trend(r):
+    return build_trend(r)
+
 @app.callback(
-    Output("event-msg","children"),
+    Output("msg","children"),
+    Output("events-table","children"),
+    Output("events-table-2","children"),
     Input("submit","n_clicks"),
     State("server","value"),
     State("resource","value"),
@@ -153,23 +191,21 @@ def load_kpis(_):
     State("value","value"),
     prevent_initial_call=True
 )
-def add_event(_, server, resource, action, value):
-    if not all([server, resource, action, value]):
-        return dbc.Alert("All fields required", color="danger")
+def add_event(_, s, r, a, v):
+    if not all([s,r,a,v]):
+        return dbc.Alert("All fields required", color="danger"), no_update, no_update
 
-    delta = float(value) if action == "ALLOCATE" else -abs(float(value))
+    val = float(v)
+    if a == "DEALLOCATE":
+        val = -abs(val)
 
     with ENGINE.begin() as c:
         c.execute(text("""
             INSERT INTO server_capacity_events
             (event_time, assetuniquename, resource_type, action, change_value, source)
             VALUES (NOW(), :s, :r, :a, :v, 'MANUAL')
-        """), {"s":server, "r":resource, "a":action, "v":delta})
+        """), {"s":s,"r":r,"a":a,"v":val})
 
-    return dbc.Alert("Event added", color="success")
-
-@app.callback(Output("events-table","children"), Input("submit","n_clicks"))
-def load_events(_):
     df = pd.read_sql("""
         SELECT event_time, assetuniquename, resource_type,
                action, change_value, source
@@ -177,15 +213,14 @@ def load_events(_):
         ORDER BY event_time DESC
         LIMIT 10
     """, ENGINE)
-    if df.empty:
-        return dbc.Alert("No events yet", color="secondary")
-    return dbc.Table.from_dataframe(df, striped=True, hover=True)
 
-@app.callback(Output("inventory-table","children"), Input("inventory-table","id"))
+    table = dbc.Table.from_dataframe(df, striped=True, hover=True)
+    return dbc.Alert("Event added", color="success"), table, table
+
+@app.callback(Output("inventory-table","children"),
+              Input("inventory-table","id"))
 def load_inventory(_):
     df = pd.read_sql("SELECT * FROM inventory LIMIT 100", ENGINE)
-    if df.empty:
-        return dbc.Alert("Inventory empty", color="secondary")
     return dbc.Table.from_dataframe(df, striped=True, hover=True)
 
 # ================= RUN =================
