@@ -1,1 +1,51 @@
+import psycopg2
+from psycopg2 import sql
 
+# ======================
+# DB CONFIG (same as ETL)
+# ======================
+DB_CONFIG = {
+    "host": "10.7.32.181",
+    "port": 5432,
+    "dbname": "GlobalInventory",
+    "user": "postgres",
+    "password": "YOUR_PASSWORD"
+}
+
+def main():
+    conn = psycopg2.connect(
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        dbname=DB_CONFIG["dbname"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"]
+    )
+
+    cur = conn.cursor()
+
+    # ----------------------
+    # Create capacity_events
+    # ----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS capacity_events (
+        id BIGSERIAL PRIMARY KEY,
+        event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        assetuniquename TEXT NOT NULL,
+
+        cpu_delta NUMERIC DEFAULT 0,
+        ram_delta_gb NUMERIC DEFAULT 0,
+        storage_delta_gb NUMERIC DEFAULT 0,
+
+        source TEXT CHECK (source IN ('MANUAL','CSV'))
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    print("✅ capacity_events table created (or already exists)")
+
+if __name__ == "__main__":
+    main()
