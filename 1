@@ -1,17 +1,17 @@
-
-```python name=mian.py
-# mian.py - Capacity Management Dashboard (updated per your requirements)
-# - Filters inventory rows to:
-#     assetstatus IN ('Running', 'Running/Not in Production')
-#     assetlocation = 'NJ Datacenter'
-#     assettype IN ('Server', 'VM')
-# - TOTAL_CAPACITY uses CPU (cores), RAM (GB), STORAGE (TB) in config.py.
-#   STORAGE is converted to GB internally for calculations and shown in TB in the UI.
-# - Inventory units: CPU cores, RAM stored in MB in DB (converted to GB for UI),
-#   Storage stored in GB in DB (display header shows GB).
-# - Events: users give CPU in cores, RAM in GB (converted to MB on save), Storage in GB.
-# - KPI card fixes & trend improvements included.
-# - Ensure config.py exists with DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT.
+# mian.py - Capacity Management Dashboard (Final revisions)
+# - Inventory filter per your SQL (assetstatus, assetlocation, assettype)
+# - KPI: CPU in cores, RAM in GB, Storage in TB
+# - Inventory: values shown with units in header only; RAM converted from MB -> GB
+# - Events: users enter CPU (cores), RAM (GB) and Storage (GB). RAM is converted to MB on save.
+# - Database stores: CPU cores, RAM in MB, Storage in GB (we handle conversions when reading/writing)
+# - CSV upload instructions and example included
+# - Improved UI layout and styling; compact Events area
+# - Requires a config.py in same folder exporting DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
+#   TOTAL_CAPACITY keys: "CPU" (cores), "RAM" (GB), "STORAGE" (TB)
+#   Example config.py:
+#     DB_CONFIG = {"user":"user","password":"pw","host":"10.7.32.181","port":5432,"dbname":"GlobalInventory"}
+#     TOTAL_CAPACITY = {"CPU": 6336, "RAM": 50688, "STORAGE": 762.03}
+#     RESERVED_PERCENT = 0.30
 
 import base64
 import io
@@ -19,18 +19,18 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from sqlalchemy import create_engine, text
 
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
-from dash import Dash, dcc, html, Input, Output, State, callback, callback_context, no_update
+from dash import Dash, dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
 
+# load config
 from config import DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
 
-# =============== Logging =================
+# ---------- Logging ----------
 logger = logging.getLogger("capacity_dashboard")
 logger.setLevel(logging.INFO)
 handler = TimedRotatingFileHandler("capacity.log", when="midnight", backupCount=7)
@@ -38,127 +38,113 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-# =============== DB Engine =================
+# ---------- DB ----------
 ENGINE = create_engine(
     f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
     f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}",
     pool_pre_ping=True
 )
 
-# =============== Inventory filters (as requested) ================
+# ---------- Inventory filters (per your FYI SQL) ----------
 INVENTORY_STATUS = ("Running", "Running/Not in Production")
 INVENTORY_LOCATION = "NJ Datacenter"
-INVENTORY_TYPES = ("Server", "VM")
+INVENTORY_TYPE = "Server/VM"  # exact string per your query
 
-# =============== Helpers =================
-def fmt(val, unit):
-    """
-    Format numbers for display:
-     - CPU: cores (integer)
-     - RAM: GB with 2 decimals
-     - STORAGE: show TB with 2 decimals (we store/compute storage in GB internally)
-    """
+# ---------- Helpers ----------
+def fmt_cpu(val):
     try:
-        v = float(val) if val is not None else 0.0
+        return f"{int(round(float(val))):,} cores"
+    except Exception:
+        return "0 cores"
+
+def fmt_ram_gb(val):
+    """Value is in GB. Show with 2 decimals and GB unit (KPI: always GB, not TB)."""
+    try:
+        v = float(val)
     except Exception:
         v = 0.0
+    return f"{v:.2f} GB"
 
-    if unit == "CPU":
-        return f"{int(round(v)):,} cores"
-    if unit == "RAM":
-        if v >= 1024:
-            return f"{v/1024:.2f} TB"
-        return f"{v:.2f} GB"
-    if unit == "STORAGE":
-        # val passed in is GB internally; show TB always with 2 decimals for clarity
-        tb = v / 1024.0
-        return f"{tb:.2f} TB"
-    return f"{v:.2f}"
+def fmt_storage_tb_from_gb(val):
+    """Value passed in GB; convert to TB and format with 2 decimals."""
+    try:
+        gb = float(val)
+    except Exception:
+        gb = 0.0
+    tb = gb / 1024.0
+    return f"{tb:.2f} TB"
 
 def parse_csv(contents, filename):
-    """
-    CSV expected headers (case-insensitive): date,server,cpu,ram,storage
-    - date: pandas-parsable
-    - cpu: cores
-    - ram: GB (user input) -> converted to MB on save
-    - storage: GB
-    Returns DataFrame with date, server, cpu, ram_gb, storage_gb
-    """
+    """Parse uploaded CSV. Required headers: date,server,cpu,ram,storage (case-insensitive).
+       ram and storage expected in GB; date parsed by pandas."""
     if not contents:
-        raise ValueError("No file contents provided")
-    content_type, content_string = contents.split(',')
+        raise ValueError("Empty upload")
+    _, content_string = contents.split(',', 1)
     decoded = base64.b64decode(content_string)
     try:
         df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
         lc = [c.lower() for c in df.columns]
         required = {'date', 'server', 'cpu', 'ram', 'storage'}
         if not required.issubset(set(lc)):
-            raise ValueError("CSV must contain columns: date, server, cpu, ram, storage")
+            raise ValueError("CSV must contain headers: date,server,cpu,ram,storage")
+        # normalize names
         mapping = {orig: orig.lower() for orig in df.columns}
         df = df.rename(columns=mapping)
         df['date'] = pd.to_datetime(df['date'], errors='coerce')
         df = df.dropna(subset=['date'])
         df['server'] = df['server'].astype(str)
-        for col in ['cpu', 'ram', 'storage']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        for c in ['cpu', 'ram', 'storage']:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         df = df[['date', 'server', 'cpu', 'ram', 'storage']].rename(columns={'ram': 'ram_gb', 'storage': 'storage_gb'})
         return df
     except Exception as e:
-        logger.exception("CSV parsing failed")
+        logger.exception("CSV parse error")
         raise ValueError(f"CSV parsing failed: {e}")
 
-def detect_ram_events_unit_and_convert_to_gb(ram_sum_raw, ram_max_raw, baseline_gb):
-    """
-    Heuristic to determine whether stored ram_delta_gb values are actually MB or GB.
-    If values are disproportionately large relative to baseline, treat as MB and convert.
-    """
+def detect_and_convert_ram_sum_to_gb(raw_sum, raw_max, baseline_gb):
+    """Heuristic to decide whether stored ram_delta_gb values are actually MB.
+       If max magnitude is huge relative to baseline or > threshold, treat as MB and divide by 1024."""
     try:
-        ram_sum = float(ram_sum_raw)
-        ram_max = float(ram_max_raw)
+        rs = float(raw_sum)
+        rm = float(raw_max)
     except Exception:
         return 0.0
-
-    # If baseline is not helpful, use absolute thresholds
     if baseline_gb is None or baseline_gb <= 0:
-        if abs(ram_max) > 1024 * 5:
-            return ram_sum / 1024.0
-        return ram_sum
+        if abs(rm) > 1024 * 5:
+            return rs / 1024.0
+        return rs
+    if abs(rm) > abs(baseline_gb) * 10 or abs(rm) > 1024 * 5:
+        return rs / 1024.0
+    return rs
 
-    if abs(ram_max) > abs(baseline_gb) * 10 or abs(ram_max) > 1024 * 5:
-        return ram_sum / 1024.0
-
-    return ram_sum
-
-# =============== Capacity Calculation =================
+# ---------- Capacity calculation ----------
 def calculate_capacity():
     """
-    Use filtered inventory only (as per user's requirement).
-    CPU unit: cores
-    RAM unit: GB (inventory servermemory is MB -> converted)
-    STORAGE internal unit: GB (inventory totaldisk is GB)
-    TOTAL_CAPACITY from config:
-      - CPU: cores
-      - RAM: GB
-      - STORAGE: TB (convert to GB here)
+    - Uses filtered inventory rows only (status/location/type).
+    - Inventory servermemory is MB -> converted to GB for baseline.
+    - Events ram_delta_gb might actually be MB values (legacy); heuristic converts to GB as needed.
+    - TOTAL_CAPACITY['STORAGE'] expected in TB in config -> convert to GB for math.
     """
     try:
-        inv_sql = f"""
+        inv_sql = """
             SELECT
                 COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric), 0) AS cpu,
-                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric)/1024.0, 0) AS ram,
-                COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage
+                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric)/1024.0, 0) AS ram_gb,
+                COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage_gb
             FROM inventory
-            WHERE COALESCE(assetstatus, '') IN ('{INVENTORY_STATUS[0]}', '{INVENTORY_STATUS[1]}')
-              AND COALESCE(assetlocation, '') = :loc
-              AND COALESCE(assettype, '') IN ('{INVENTORY_TYPES[0]}', '{INVENTORY_TYPES[1]}')
+            WHERE assetstatus IN (:s1, :s2)
+              AND assetlocation = :loc
+              AND assettype = :atype
         """
-        inv = pd.read_sql(text(inv_sql), ENGINE, params={"loc": INVENTORY_LOCATION})
+        inv = pd.read_sql(text(inv_sql), ENGINE, params={
+            "s1": INVENTORY_STATUS[0], "s2": INVENTORY_STATUS[1],
+            "loc": INVENTORY_LOCATION, "atype": INVENTORY_TYPE
+        })
 
         baseline_cpu = float(inv['cpu'].iloc[0])
-        baseline_ram_gb = float(inv['ram'].iloc[0])      # inventory stored in MB -> /1024 => GB
-        baseline_storage_gb = float(inv['storage'].iloc[0])
+        baseline_ram_gb = float(inv['ram_gb'].iloc[0])
+        baseline_storage_gb = float(inv['storage_gb'].iloc[0])
 
-        # Aggregate event sums and ram max (for unit detection)
         ev_sql = """
             SELECT
                 COALESCE(SUM(cpu_delta), 0) AS cpu_sum,
@@ -167,81 +153,79 @@ def calculate_capacity():
                 COALESCE(SUM(storage_delta_gb), 0) AS storage_sum
             FROM capacity_events
         """
-        ev_agg = pd.read_sql(text(ev_sql), ENGINE)
+        ev = pd.read_sql(text(ev_sql), ENGINE)
+        cpu_sum = float(ev['cpu_sum'].iloc[0])
+        ram_sum_raw = float(ev['ram_sum_raw'].iloc[0])
+        ram_max_raw = float(ev['ram_max_raw'].iloc[0])
+        storage_sum = float(ev['storage_sum'].iloc[0])
 
-        cpu_sum = float(ev_agg['cpu_sum'].iloc[0])
-        ram_sum_raw = float(ev_agg['ram_sum_raw'].iloc[0])
-        ram_max_raw = float(ev_agg['ram_max_raw'].iloc[0])
-        storage_sum = float(ev_agg['storage_sum'].iloc[0])
+        # Convert TOTAL_CAPACITY storage TB -> GB for math
+        total_storage_tb = TOTAL_CAPACITY.get("STORAGE", 0)
+        total_storage_gb = total_storage_tb * 1024.0
 
-        # Convert TOTAL_CAPACITY STORAGE from TB -> GB for math
-        total_storage_gb = TOTAL_CAPACITY.get("STORAGE", 0) * 1024.0
+        # Convert event ram sum to GB (if necessary)
+        ram_sum_gb = detect_and_convert_ram_sum_to_gb(ram_sum_raw, ram_max_raw, baseline_ram_gb)
 
-        # Normalize event ram sum to GB using heuristic
-        ram_sum_gb = detect_ram_events_unit_and_convert_to_gb(ram_sum_raw, ram_max_raw, baseline_ram_gb)
+        used_cpu = baseline_cpu + cpu_sum
+        used_ram_gb = baseline_ram_gb + ram_sum_gb
+        used_storage_gb = baseline_storage_gb + storage_sum
 
-        used = {
-            "CPU": baseline_cpu + cpu_sum,
-            "RAM": baseline_ram_gb + ram_sum_gb,
-            "STORAGE": baseline_storage_gb + storage_sum
-        }
-
-        result = {}
-        for k in ["CPU", "RAM", "STORAGE"]:
-            if k == "STORAGE":
-                total = total_storage_gb          # internal total in GB
+        results = {}
+        for key in ("CPU", "RAM", "STORAGE"):
+            if key == "STORAGE":
+                total = total_storage_gb
             else:
-                total = TOTAL_CAPACITY.get(k, 0)
+                total = TOTAL_CAPACITY.get(key, 0)
             reserved = total * RESERVED_PERCENT
             usable = max(total - reserved, 0)
-            used_k = max(used[k], 0)
-            pct = (used_k / usable * 100) if usable > 0 else 0
-            available = max(usable - used_k, 0)
-            result[k] = {
-                "used": used_k,      # CPU cores, RAM GB, STORAGE GB
-                "total": total,      # CPU cores, RAM GB, STORAGE GB (storage is GB internally)
+            used_val = {"CPU": used_cpu, "RAM": used_ram_gb, "STORAGE": used_storage_gb}[key]
+            pct = (used_val / usable * 100) if usable > 0 else 0
+            available = max(usable - used_val, 0)
+            results[key] = {
+                "used": used_val,
+                "total": total,
                 "reserved": reserved,
                 "usable": usable,
                 "available": available,
                 "pct": pct
             }
-        logger.info("Capacity calculated: %s", result)
-        return result
+        logger.info("Capacity results: %s", results)
+        return results
     except Exception as e:
-        logger.exception("Capacity calculation failed")
+        logger.exception("calculate_capacity failed")
         return {
             "CPU": {"used":0,"total":0,"reserved":0,"usable":0,"available":0,"pct":0},
             "RAM": {"used":0,"total":0,"reserved":0,"usable":0,"available":0,"pct":0},
             "STORAGE": {"used":0,"total":0,"reserved":0,"usable":0,"available":0,"pct":0}
         }
 
-# =============== Trend Builder =================
+# ---------- Trend builder ----------
 def build_trend(resource):
-    """
-    Trend shows baseline + cumulative events over last 30 days.
-    For STORAGE, convert GB -> TB for plotting (so units in chart are TB).
-    """
+    """Nice-looking trend: baseline dotted, used filled line, usable dashed. For STORAGE chart units in TB."""
     try:
-        inv_sql = f"""
+        inv_sql = """
             SELECT
                 COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric), 0) AS cpu,
-                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric)/1024.0, 0) AS ram,
-                COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage
+                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric)/1024.0, 0) AS ram_gb,
+                COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage_gb
             FROM inventory
-            WHERE COALESCE(assetstatus, '') IN ('{INVENTORY_STATUS[0]}', '{INVENTORY_STATUS[1]}')
-              AND COALESCE(assetlocation, '') = :loc
-              AND COALESCE(assettype, '') IN ('{INVENTORY_TYPES[0]}', '{INVENTORY_TYPES[1]}')
+            WHERE assetstatus IN (:s1, :s2)
+              AND assetlocation = :loc
+              AND assettype = :atype
         """
-        base = pd.read_sql(text(inv_sql), ENGINE, params={"loc": INVENTORY_LOCATION})
-        baseline = float(base[resource.lower()].iloc[0])
+        inv = pd.read_sql(text(inv_sql), ENGINE, params={
+            "s1": INVENTORY_STATUS[0], "s2": INVENTORY_STATUS[1],
+            "loc": INVENTORY_LOCATION, "atype": INVENTORY_TYPE
+        })
+        baseline = float(inv[resource.lower() if resource != "RAM" else "ram_gb"].iloc[0])
 
-        # For usable line (visual)
+        # usable line
         if resource == "STORAGE":
-            total_val = TOTAL_CAPACITY.get("STORAGE", 0) * 1024.0  # TB -> GB
-            usable_line = max(total_val - total_val * RESERVED_PERCENT, 0)
+            total_gb = TOTAL_CAPACITY.get("STORAGE", 0) * 1024.0
+            usable_line = max(total_gb - total_gb * RESERVED_PERCENT, 0)
         else:
-            total_val = TOTAL_CAPACITY.get(resource, 0)
-            usable_line = max(total_val - total_val * RESERVED_PERCENT, 0)
+            total = TOTAL_CAPACITY.get(resource, 0)
+            usable_line = max(total - total * RESERVED_PERCENT, 0)
 
         today = datetime.today().date()
         start = today - timedelta(days=30)
@@ -269,69 +253,51 @@ def build_trend(resource):
             df = df.set_index('d').reindex(date_range).fillna(0).reset_index()
             df.columns = ['d', 'v']
 
-        # RAM stored-in-unit detection
+        # RAM event detection & convert if stored in MB
         if resource == "RAM":
             if df['v'].abs().max() > (abs(baseline) * 10 if baseline > 0 else 1024 * 5):
                 df['v'] = df['v'] / 1024.0
 
-        # cumulative used (baseline + cumulative events)
         df['used'] = baseline + df['v'].cumsum()
 
-        # For STORAGE, convert used (GB) to TB for plotting & labels (so chart is in TB)
+        # For storage chart, convert to TB for readability
         if resource == "STORAGE":
-            df['used_plot'] = df['used'] / 1024.0
-            usable_plot = usable_line / 1024.0
+            df['plot'] = df['used'] / 1024.0  # TB
             baseline_plot = baseline / 1024.0
+            usable_plot = usable_line / 1024.0
             y_label = "Used (TB)"
         else:
-            df['used_plot'] = df['used']
-            usable_plot = usable_line
+            df['plot'] = df['used']
             baseline_plot = baseline
+            usable_plot = usable_line
             y_label = "Used (cores)" if resource == "CPU" else "Used (GB)"
 
-        # Create a cleaner plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df['d'], y=df['used_plot'], mode='lines', line=dict(color='#0b5ed7', width=3),
-            fill='tozeroy', name='Used'
-        ))
-        # baseline
-        fig.add_trace(go.Scatter(
-            x=[df['d'].iloc[0], df['d'].iloc[-1]],
-            y=[baseline_plot, baseline_plot],
-            mode='lines', line=dict(color='rgba(11,94,215,0.6)', width=1, dash='dot'),
-            name='Baseline'
-        ))
-        # usable line
+        fig.add_trace(go.Scatter(x=df['d'], y=df['plot'], mode='lines', line=dict(color='#0b5ed7', width=2), fill='tozeroy', name='Used'))
+        fig.add_trace(go.Scatter(x=[df['d'].iloc[0], df['d'].iloc[-1]], y=[baseline_plot, baseline_plot],
+                                 mode='lines', line=dict(color='rgba(11,94,215,0.6)', dash='dot'), name='Baseline'))
         if usable_plot > 0:
-            fig.add_trace(go.Scatter(
-                x=[df['d'].iloc[0], df['d'].iloc[-1]],
-                y=[usable_plot, usable_plot],
-                mode='lines', line=dict(color='rgba(220,53,69,0.6)', width=1, dash='dash'),
-                name='Usable'
-            ))
+            fig.add_trace(go.Scatter(x=[df['d'].iloc[0], df['d'].iloc[-1]], y=[usable_plot, usable_plot],
+                                     mode='lines', line=dict(color='rgba(220,53,69,0.6)', dash='dash'), name='Usable'))
 
-        fig.update_layout(
-            template="plotly_white",
-            title=f"{resource} Usage - Last 30 Days",
-            xaxis_title="Date",
-            yaxis_title=y_label,
-            height=360,
-            margin=dict(t=45, b=30, l=40, r=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+        fig.update_layout(template="plotly_white", title=f"{resource} Usage - Last 30 Days",
+                          xaxis_title="Date", yaxis_title=y_label, height=360,
+                          margin=dict(t=40, b=30, l=40, r=20),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         return fig
     except Exception as e:
-        logger.exception("Trend build failed")
-        return px.area(title=f"{resource} Trend - No data")
+        logger.exception("build_trend failed")
+        return go.Figure()
 
-# =============== Dash App Layout =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.CERULEAN])
-app.title = "Capacity Management Dashboard"
+# ---------- Dash app ----------
+external_styles = [dbc.themes.FLATLY]
+app = Dash(__name__, external_stylesheets=external_styles)
+app.title = "Capacity Dashboard"
 
+# Navbar
 navbar = dbc.Navbar(
     dbc.Container([
-        dbc.NavbarBrand("Capacity Dashboard", className="ms-2", style={"color":"#ffffff", "fontWeight":"700"}),
+        dbc.NavbarBrand("Capacity Dashboard", className="text-white"),
         dbc.Button("Refresh", id="refresh", color="light")
     ]),
     color="#0b5ed7",
@@ -339,32 +305,35 @@ navbar = dbc.Navbar(
     className="mb-3"
 )
 
-# Events instruction small and placed to left; form in middle; recent in right
+# Instructions card for events
 events_instructions = dbc.Card(
     dbc.CardBody([
-        html.H6("Quick Instructions", className="mb-2"),
+        html.H6("Events — How to enter data", className="mb-2"),
         html.Ul([
-            html.Li("Server: unique name (match inventory for baseline)."),
-            html.Li("CPU Δ: cores (positive/negative)."),
-            html.Li("RAM Δ: GB (entered in GB; converted to MB on save)."),
-            html.Li("Storage Δ: GB (entered and saved in GB)."),
-            html.Li("CSV headers: date,server,cpu,ram,storage (ram in GB).")
-        ], style={"fontSize":"0.9rem"})
+            html.Li("CPU Δ: cores (e.g. 2 or -1)"),
+            html.Li("RAM Δ: GB (e.g. 8 or -4) — this will be converted to MB in DB"),
+            html.Li("Storage Δ: GB (e.g. 100 or -50)"),
+            html.Li("Server: exact assetuniquename (to tie to inventory baseline)"),
+        ], style={"fontSize":"0.9rem"}),
+        html.H6("CSV format", className="mt-2"),
+        html.P("CSV headers (case-insensitive): date,server,cpu,ram,storage. ram/storage in GB.", style={"fontSize":"0.9rem"}),
+        html.Pre("date,server,cpu,ram,storage\n2026-01-10,web-01,2,8,100", style={"fontSize":"0.85rem"})
     ]),
     className="mb-2"
 )
 
+# Layout
 app.layout = dbc.Container([
     navbar,
     html.Div([
         html.H2("Capacity Management Dashboard", style={"color":"#0b5ed7"}),
-        html.P("Filtered view: Running servers in NJ Datacenter (Server/VM)", style={"color":"#495057"})
+        html.P("Filtered: Running servers in NJ Datacenter (Server/VM)", style={"color":"#495057"})
     ], className="mb-3"),
     dcc.Interval(id="interval", interval=5*60*1000, n_intervals=0),
 
     dbc.Tabs([
         dbc.Tab(label="Dashboard", children=[
-            html.H4("KPI Overview", className="mt-3"),
+            html.H4("KPIs", className="mt-3"),
             dbc.Row(id="kpi-row", className="g-4 mb-4"),
             html.H4("30-Day Trends", className="mt-3"),
             dbc.Row([
@@ -378,55 +347,57 @@ app.layout = dbc.Container([
         dbc.Tab(label="Events", children=[
             dbc.Row([
                 dbc.Col(events_instructions, md=3),
-
                 dbc.Col(
                     dbc.Card(
                         dbc.CardBody([
-                            html.H5("Add New Event", className="mb-3"),
+                            html.H5("Add Event", className="mb-2"),
                             dbc.Row([
-                                dbc.Col(dbc.Input(id="server", placeholder="Server (required)"), md=12)
+                                dbc.Col(dbc.Label("Server (required)"), md=12),
+                                dbc.Col(dbc.Input(id="server", placeholder="assetuniquename"), md=12)
                             ], className="mb-2"),
                             dbc.Row([
-                                dbc.Col(dbc.Input(id="cpu", type="number", placeholder="CPU Δ (cores)"), md=6),
-                                dbc.Col(dbc.Input(id="ram", type="number", placeholder="RAM Δ (GB)"), md=6)
+                                dbc.Col(dbc.Label("CPU Δ (cores)"), md=6),
+                                dbc.Col(dbc.Label("RAM Δ (GB)"), md=6)
+                            ]),
+                            dbc.Row([
+                                dbc.Col(dbc.Input(id="cpu", type="number", placeholder="e.g. 2"), md=6),
+                                dbc.Col(dbc.Input(id="ram", type="number", placeholder="e.g. 8"), md=6)
                             ], className="mb-2"),
                             dbc.Row([
-                                dbc.Col(dbc.Input(id="storage", type="number", placeholder="Storage Δ (GB)"), md=12)
+                                dbc.Col(dbc.Label("Storage Δ (GB)"), md=12),
+                                dbc.Col(dbc.Input(id="storage", type="number", placeholder="e.g. 100"), md=12)
                             ], className="mb-3"),
-                            dbc.Button("Submit Event", id="submit", color="primary", className="w-100 mb-2"),
+                            dbc.Button("Submit Event", id="submit", color="primary", className="w-100"),
                             html.Div(id="msg", className="mt-2"),
                             html.Hr(),
                             dcc.Upload(
                                 id="csv-upload",
-                                children=dbc.Button("Upload CSV (date,server,cpu,ram,storage)", color="secondary", className="w-100"),
+                                children=dbc.Button("Upload CSV", color="secondary", className="w-100"),
                                 multiple=False
                             ),
                             html.Div(id="csv-msg", className="mt-2")
                         ])
                     ), md=5
                 ),
-
                 dbc.Col(
-                    dbc.Card(
-                        dbc.CardBody([
-                            html.H5("Recent Events (last 10)", className="mb-3"),
-                            html.Div(id="recent-events")
-                        ])
-                    ), md=4
+                    dbc.Card(dbc.CardBody([
+                        html.H5("Recent Events (last 10)", className="mb-2"),
+                        html.Div(id="recent-events")
+                    ])), md=4
                 )
             ], className="mt-3")
         ]),
 
         dbc.Tab(label="Inventory", children=[
             html.H4("Filtered Inventory", className="mt-3"),
-            html.P("Showing only Running / Running/Not in Production servers located in NJ Datacenter and type Server/VM", style={"fontSize":"0.9rem"}),
+            html.P("Showing: assetstatus IN ('Running','Running/Not in Production'), assetlocation = 'NJ Datacenter', assettype = 'Server/VM'", style={"fontSize":"0.9rem"}),
             html.Div(id="inventory-table", className="mt-2")
         ])
     ])
 ], fluid=True)
 
-# =============== Callbacks =================
-@callback(
+# ---------- Callbacks ----------
+@app.callback(
     [
         Output("kpi-row", "children"),
         Output("alerts", "children"),
@@ -455,22 +426,22 @@ app.layout = dbc.Container([
 )
 def master_callback(submit_n, csv_contents, n_intervals, refresh_n, server, cpu, ram, storage, filename):
     ctx = callback_context
-    triggered_prop = ctx.triggered[0]['prop_id'] if ctx.triggered else ""
-    triggered_id = triggered_prop.split('.')[0] if triggered_prop else ""
+    triggered = ctx.triggered[0]['prop_id'] if ctx.triggered else ""
+    triggered_id = triggered.split('.')[0] if triggered else ""
 
     msg = no_update
     csv_msg = no_update
     refresh_needed = False
 
-    # Manual Event submit
+    # Manual submit
     if triggered_id == "submit" and submit_n:
         if not server or str(server).strip() == "":
-            msg = dbc.Alert("Server name required", color="danger")
+            msg = dbc.Alert("Server (assetuniquename) is required", color="danger")
         elif (cpu is None or float(cpu) == 0) and (ram is None or float(ram) == 0) and (storage is None or float(storage) == 0):
-            msg = dbc.Alert("Provide at least one non-zero delta (CPU, RAM, or Storage)", color="danger")
+            msg = dbc.Alert("Provide at least one non-zero delta (CPU, RAM or Storage)", color="danger")
         else:
             try:
-                # Convert RAM from GB -> MB for DB persistence (as requested)
+                # Convert RAM from GB -> MB for DB storage
                 ram_mb = 0.0
                 if ram is not None:
                     ram_mb = float(ram) * 1024.0
@@ -480,13 +451,13 @@ def master_callback(submit_n, csv_contents, n_intervals, refresh_n, server, cpu,
                         (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time)
                         VALUES (:s, :c, :r, :st, 'MANUAL', now())
                     """), {"s": server, "c": float(cpu or 0), "r": ram_mb, "st": float(storage or 0)})
-                msg = dbc.Alert("Event saved (RAM converted to MB for DB)", color="success")
+                msg = dbc.Alert("Event saved (RAM converted to MB for DB).", color="success")
                 refresh_needed = True
             except Exception as e:
-                logger.exception("Manual event insert failed")
+                logger.exception("manual insert failed")
                 msg = dbc.Alert(f"Error saving event: {e}", color="danger")
 
-    # CSV Upload
+    # CSV upload
     if triggered_id == "csv-upload" and csv_contents:
         try:
             df = parse_csv(csv_contents, filename)
@@ -504,85 +475,92 @@ def master_callback(submit_n, csv_contents, n_intervals, refresh_n, server, cpu,
                         "storage": float(row['storage_gb']),
                         "date": row['date']
                     })
-            csv_msg = dbc.Alert(f"Imported {len(df)} rows (RAM converted GB→MB on save)", color="success")
+            csv_msg = dbc.Alert(f"Imported {len(df)} rows (RAM GB→MB on save)", color="success")
             refresh_needed = True
         except Exception as e:
-            logger.exception("CSV import failed")
+            logger.exception("csv import failed")
             csv_msg = dbc.Alert(f"CSV error: {e}", color="danger")
 
+    # Refresh triggers (initial load, interval, refresh button, or after edits)
     if refresh_needed or triggered_id in ("interval", "refresh") or triggered_id == "":
-        # Recompute capacity and UI elements
         cap = calculate_capacity()
 
-        # Build KPI cards
-        kpi_cards = []
+        # KPI cards
+        kpi_children = []
         alerts = []
-        for k in ["CPU", "RAM", "STORAGE"]:
+        for k in ("CPU", "RAM", "STORAGE"):
             d = cap[k]
-            # pick color
-            if d["pct"] > 100:
+            pct = d.get("pct", 0)
+            if pct > 100:
                 color = "danger"
-            elif d["pct"] > 90:
+            elif pct > 90:
                 color = "danger"
-            elif d["pct"] > 80:
+            elif pct > 80:
                 color = "warning"
             else:
                 color = "primary"
 
-            # show formatted values; STORAGE displayed in TB (fmt handles it)
-            used_text = fmt(d["used"], k)
-            total_text = fmt(d["total"], k)
-            reserved_text = fmt(d["reserved"], k)
-            usable_text = fmt(d["usable"], k)
-            available_text = fmt(d["available"], k)
+            if k == "CPU":
+                used_text = fmt_cpu(d['used'])
+                total_text = fmt_cpu(d['total'])
+                reserved_text = fmt_cpu(d['reserved'])
+                usable_text = fmt_cpu(d['usable'])
+                available_text = fmt_cpu(d['available'])
+            elif k == "RAM":
+                used_text = fmt_ram_gb(d['used'])
+                total_text = fmt_ram_gb(d['total'])
+                reserved_text = fmt_ram_gb(d['reserved'])
+                usable_text = fmt_ram_gb(d['usable'])
+                available_text = fmt_ram_gb(d['available'])
+            else:  # STORAGE: d values are in GB; show TB in UI
+                used_text = fmt_storage_tb_from_gb(d['used'])
+                total_text = fmt_storage_tb_from_gb(d['total'])
+                reserved_text = fmt_storage_tb_from_gb(d['reserved'])
+                usable_text = fmt_storage_tb_from_gb(d['usable'])
+                available_text = fmt_storage_tb_from_gb(d['available'])
 
-            card = dbc.Card([
+            card = dbc.Card(
                 dbc.CardBody([
-                    html.Div([
-                        html.H6(k, className="mb-1"),
-                        html.H4(used_text, className="mb-2")
-                    ]),
+                    html.H6(k, className="mb-1"),
+                    html.H4(used_text, className="mb-2"),
                     html.Div([
                         html.Small(f"Total: {total_text}", className="me-3"),
                         html.Small(f"Reserved: {reserved_text}", className="me-3"),
                         html.Small(f"Usable: {usable_text}")
                     ], className="d-flex flex-wrap mb-2"),
-                    dbc.Progress(value=min(d["pct"], 100), color=color, style={"height":"18px"}),
+                    dbc.Progress(value=min(pct, 100), color=color, style={"height":"18px"}),
                     html.Div(className="d-flex justify-content-between mt-2", children=[
                         html.Small(f"Available: {available_text}"),
-                        html.Small(f"{d['pct']:.1f}%")
+                        html.Small(f"{pct:.1f}%")
                     ])
-                ])
-            ], className="shadow-sm")
+                ]), className="shadow-sm"
+            )
+            kpi_children.append(dbc.Col(card, md=4))
 
-            kpi_cards.append(dbc.Col(card, md=4))
-
-            if d["pct"] > 90:
-                alerts.append(dbc.Alert(f"High {k} utilization ({d['pct']:.1f}%)", color="warning", dismissable=True))
+            if pct > 90:
+                alerts.append(dbc.Alert(f"High {k} utilization ({pct:.1f}%)", color="warning", dismissable=True))
 
         # Trends
         cpu_trend = build_trend("CPU")
         ram_trend = build_trend("RAM")
         storage_trend = build_trend("STORAGE")
 
-        # Recent events (last 10)
+        # Recent events
         recent_df = pd.read_sql("""
             SELECT event_time, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb
             FROM capacity_events
             ORDER BY event_time DESC LIMIT 10
         """, ENGINE)
-
         if not recent_df.empty:
-            # Present RAM delta in GB for readability (convert MB values > 1024 back to GB for display)
-            def present_ram(v):
+            def show_ram(v):
                 try:
                     vv = float(v)
                 except:
                     return v
+                # if stored as MB (large), convert back to GB for display
                 if abs(vv) > 1024 * 2:
                     return f"{vv/1024:.2f} GB"
                 return f"{vv:.2f} GB"
-
             recent_df = recent_df.rename(columns={
                 "event_time": "Event Time",
                 "assetuniquename": "Server",
@@ -590,39 +568,56 @@ def master_callback(submit_n, csv_contents, n_intervals, refresh_n, server, cpu,
                 "ram_delta_gb": "RAM Δ",
                 "storage_delta_gb": "Storage Δ (GB)"
             })
-            recent_df["RAM Δ"] = recent_df["RAM Δ"].apply(present_ram)
+            recent_df["RAM Δ"] = recent_df["RAM Δ"].apply(show_ram)
             recent_table = dbc.Table.from_dataframe(recent_df, striped=True, hover=True, bordered=True, responsive=True)
         else:
             recent_table = html.P("No recent events", className="text-center text-muted p-4")
 
-        # Inventory table with filters applied
-        inv_sql = f"""
-            SELECT 
-                assetuniquename AS "Server Name",
-                assetipaddress AS "IP Address",
-                servercores AS "CPU (cores)",
-                ROUND(COALESCE(NULLIF(TRIM(servermemory), '')::numeric / 1024.0, 0), 2) AS "RAM (GB)",
-                totaldisk AS "Storage (GB)",
-                assetstatus AS "Status",
-                assetlocation AS "Location",
-                assettype AS "Type"
+        # Inventory table (exact columns per your FYI SQL)
+        inv_sql = """
+            SELECT
+                assetipaddress,
+                servercores,
+                servermemory,
+                totaldisk,
+                assetstatus
             FROM inventory
-            WHERE COALESCE(assetstatus, '') IN ('{INVENTORY_STATUS[0]}', '{INVENTORY_STATUS[1]}')
-              AND COALESCE(assetlocation, '') = :loc
-              AND COALESCE(assettype, '') IN ('{INVENTORY_TYPES[0]}', '{INVENTORY_TYPES[1]}')
-            ORDER BY assetuniquename
+            WHERE assetstatus IN (:s1, :s2)
+              AND assetlocation = :loc
+              AND assettype = :atype
+            ORDER BY assetipaddress
         """
-        inv_df = pd.read_sql(text(inv_sql), ENGINE, params={"loc": INVENTORY_LOCATION}).fillna("N/A")
+        inv_df = pd.read_sql(text(inv_sql), ENGINE, params={
+            "s1": INVENTORY_STATUS[0], "s2": INVENTORY_STATUS[1],
+            "loc": INVENTORY_LOCATION, "atype": INVENTORY_TYPE
+        })
+
         if not inv_df.empty:
-            # Keep units in header only (we already have header names like "RAM (GB)")
-            inv_table = dbc.Table.from_dataframe(inv_df[["Server Name", "IP Address", "CPU (cores)", "RAM (GB)", "Storage (GB)", "Status", "Location", "Type"]], striped=True, hover=True, bordered=True, responsive=True)
+            # Convert servermemory (MB) -> GB for display, keep header unit only
+            inv_df = inv_df.rename(columns={
+                "assetipaddress": "IP Address",
+                "servercores": "CPU (cores)",
+                "servermemory": "RAM (GB)",
+                "totaldisk": "Storage (GB)",
+                "assetstatus": "Status"
+            })
+            # convert RAM
+            def mem_to_gb(x):
+                try:
+                    return round(float(x) / 1024.0, 2)
+                except:
+                    return "N/A"
+            inv_df["RAM (GB)"] = inv_df["RAM (GB)"].apply(mem_to_gb)
+            # Keep numeric cells without units; header shows units
+            inv_table = dbc.Table.from_dataframe(inv_df[["IP Address", "CPU (cores)", "RAM (GB)", "Storage (GB)", "Status"]], striped=True, hover=True, bordered=True, responsive=True)
         else:
-            inv_table = html.P("No inventory data (filtered) found", className="text-center text-muted p-4")
+            inv_table = html.P("No inventory records matched filters", className="text-center text-muted p-4")
 
-        return kpi_cards, alerts, cpu_trend, ram_trend, storage_trend, recent_table, inv_table, no_update, no_update
+        return kpi_children, alerts, cpu_trend, ram_trend, storage_trend, recent_table, inv_table, no_update, no_update
 
-    # No change
+    # no change
     return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
+# ---------- Run ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
