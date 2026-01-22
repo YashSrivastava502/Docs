@@ -1,6 +1,5 @@
 # app.py - Full Fixed Capacity Management Dashboard
-# Fixes: Inventory columns only specified ones + NA fill, Trends show baseline if no events, KPI units fixed (RAM MB->TB? but assume GB from example, convert properly), Cap pct/available, Beautiful UI (Minty theme, icons, responsive cards)
-# Used = sum(inventory) + sum(events deltas) – that's correct as per original logic
+# Fixes: RAM inventory in MB -> divide by 1024 to GB, Storage GB no change, CPU cores no change; Inventory table convert servermemory to GB; Trends show flat baseline if no events; KPI correct (Used = inventory sum + events sum); More beautiful UI (Minty theme, icons, tooltips, refresh button); Added: Auto-refresh every 60s, instructions in events tab, summary stats
 # Run with: python app.py
 # Open: http://localhost:8050
 # Requirements: pip install dash dash-bootstrap-components plotly pandas sqlalchemy psycopg2-binary
@@ -58,13 +57,13 @@ def parse_csv(contents, filename):
         raise ValueError(f"CSV parsing failed: {str(e)}")
 
 # ================= CAPACITY CALCULATION =================
-# Used = sum(inventory columns) + sum(events deltas)
+# Used = sum(inventory) + sum(events deltas)
 def calculate_capacity():
     try:
         inv = pd.read_sql("""
             SELECT
                 COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric), 0) AS cpu,
-                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric), 0) AS ram,  -- Assume GB (per user example 8.0000 GB)
+                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric) / 1024.0, 0) AS ram,  -- MB to GB
                 COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage  -- GB
             FROM inventory
         """, ENGINE)
@@ -78,8 +77,8 @@ def calculate_capacity():
         ev = pd.read_sql("""
             SELECT
                 COALESCE(SUM(cpu_delta), 0) AS cpu,
-                COALESCE(SUM(ram_delta_gb), 0) AS ram,
-                COALESCE(SUM(storage_delta_gb), 0) AS storage
+                COALESCE(SUM(ram_delta_gb), 0) AS ram,  -- GB
+                COALESCE(SUM(storage_delta_gb), 0) AS storage  -- GB
             FROM capacity_events
         """, ENGINE)
 
@@ -91,7 +90,7 @@ def calculate_capacity():
 
         result = {}
         for k in used:
-            total = TOTAL_CAPACITY.get(k, 0)  # Use 0 if not defined
+            total = TOTAL_CAPACITY.get(k, 0)
             reserved = total * RESERVED_PERCENT
             usable = total - reserved
             used_k = max(used[k], 0)
@@ -120,7 +119,7 @@ def build_trend(resource):
         base_query = """
             SELECT
                 COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric), 0) AS cpu,
-                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric), 0) AS ram,
+                COALESCE(SUM(NULLIF(TRIM(servermemory), '')::numeric) / 1024.0, 0) AS ram,  -- MB to GB
                 COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric), 0) AS storage
             FROM inventory
         """
@@ -130,6 +129,9 @@ def build_trend(resource):
             "RAM": float(base['ram'].iloc[0]),
             "STORAGE": float(base['storage'].iloc[0])
         }[resource]
+
+        if baseline == 0:
+            return px.line(title=f"No {resource} data in inventory", template="plotly_white")
 
         today = datetime.today().date()
         thirty_days_ago = today - timedelta(days=30)
@@ -150,15 +152,12 @@ def build_trend(resource):
         df = df.set_index('d').reindex(date_range).fillna(0).reset_index()
         df.columns = ['d', 'v']
 
-        if df['v'].sum() == 0:  # No events, show constant baseline
-            df['used'] = baseline
-        else:
-            df['used'] = baseline + df['v'].cumsum()
+        df['used'] = baseline + df['v'].cumsum()
 
         fig = px.line(df, x="d", y="used",
                       title=f"{resource} Trend (Last 30 Days)",
                       template="plotly_white",
-                      color_discrete_sequence=["#28a745"])
+                      color_discrete_sequence=["#198754"])
         fig.update_layout(
             height=300,
             margin=dict(l=20, r=20, t=40, b=40),
@@ -172,7 +171,7 @@ def build_trend(resource):
         return px.line(title="No trend data")
 
 # ================= DASH APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.MINTY])  # Minty for beautiful, modern, green-accented design
+app = Dash(__name__, external_stylesheets=[dbc.themes.MINTY])
 app.title = "Capacity Dashboard"
 
 app.layout = dbc.Container([
@@ -180,14 +179,22 @@ app.layout = dbc.Container([
 
     dbc.Tabs([
         dbc.Tab(label="Dashboard", children=[
-            html.H5("Current Capacity KPIs", className="text-center text-muted my-3"),
+            dbc.Row([
+                dbc.Col(html.H5("Current Capacity KPIs", className="text-center text-muted my-3"), width=12),
+            ]),
             dbc.Row(id="kpi-row", className="g-4 justify-content-center mb-5"),
 
-            html.H5("30-Day Usage Trends", className="text-center text-muted my-3"),
+            dbc.Row([
+                dbc.Col(html.H5("30-Day Usage Trends", className="text-center text-muted my-3"), width=12),
+            ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="cpu-trend"), md=4),
                 dbc.Col(dcc.Graph(id="ram-trend"), md=4),
                 dbc.Col(dcc.Graph(id="storage-trend"), md=4),
+            ]),
+            # Added: Refresh button
+            dbc.Row([
+                dbc.Col(dbc.Button("Refresh Data", id="refresh-btn", color="primary", className="mt-4"), width={"size": 2, "offset": 5}),
             ])
         ]),
 
@@ -195,75 +202,87 @@ app.layout = dbc.Container([
             dbc.Row([
                 dbc.Col([
                     html.H6("Add New Event", className="mb-3 text-success"),
+                    html.P("Guide: Enter server name (required). For deltas: positive to add capacity, negative to remove. At least one delta (CPU, RAM, or Storage) must be filled. Example: Add 4 cores, 32 GB RAM to 'srv-001'.", className="small text-muted mb-3"),
                     dbc.InputGroup([
                         dbc.InputGroupText("Server"),
-                        dbc.Input(id="server", placeholder="Required")
+                        dbc.Input(id="server", placeholder="Required e.g. srv-001")
                     ], className="mb-2"),
                     dbc.InputGroup([
                         dbc.InputGroupText("CPU Δ"),
-                        dbc.Input(id="cpu", type="number", placeholder="Cores")
+                        dbc.Input(id="cpu", type="number", placeholder="Cores e.g. 4 or -2")
                     ], className="mb-2"),
                     dbc.InputGroup([
                         dbc.InputGroupText("RAM Δ"),
-                        dbc.Input(id="ram", type="number", placeholder="GB")
+                        dbc.Input(id="ram", type="number", placeholder="GB e.g. 32 or -16")
                     ], className="mb-2"),
                     dbc.InputGroup([
                         dbc.InputGroupText("Storage Δ"),
-                        dbc.Input(id="storage", type="number", placeholder="GB")
+                        dbc.Input(id="storage", type="number", placeholder="GB e.g. 500 or -200")
                     ], className="mb-2"),
-                    dbc.Button("Submit", id="submit", color="success", className="w-100"),
+                    dbc.Button("Submit Event", id="submit", color="success", className="w-100"),
                     html.Div(id="msg", className="mt-3"),
 
                     html.Hr(className="my-4"),
-                    html.H6("CSV Upload", className="mb-3 text-success"),
+                    html.H6("Bulk CSV Upload", className="mb-3 text-success"),
+                    html.P("Guide: CSV columns: date (YYYY-MM-DD), server, cpu (cores), ram (GB), storage (GB). Multiple rows for batch events.", className="small text-muted mb-3"),
                     dcc.Upload(
                         id="csv-upload",
-                        children=dbc.Button("Upload (date,server,cpu,ram,storage)", color="secondary", className="w-100"),
+                        children=dbc.Button("Upload CSV", color="secondary", className="w-100"),
                         multiple=False
                     ),
                     html.Div(id="csv-msg", className="mt-3")
-                ], md=3, className="p-4 bg-white rounded shadow"),
+                ], md=4, className="p-4 bg-white rounded shadow"),
 
                 dbc.Col([
-                    html.H6("Recent Events", className="mb-3 text-success"),
+                    html.H6("Recent Events (Last 10)", className="mb-3 text-success"),
                     html.Div(id="recent-events"),
 
                     html.Hr(),
-                    html.H6("All Events", className="mb-3 text-success"),
+                    html.H6("All Events (Last 100)", className="mb-3 text-success"),
                     html.Div(id="event-table")
-                ], md=9)
+                ], md=8)
             ], className="mt-4")
         ]),
 
         dbc.Tab(label="Inventory", children=[
-            html.H5("Server Inventory", className="text-center text-success my-4"),
+            html.H5("Server Inventory (Read-Only)", className="text-center text-success my-4"),
             html.Div(id="inventory-table")
         ])
-    ], className="shadow-lg rounded")
+    ], className="shadow-lg rounded"),
+    # Added: Auto-refresh interval
+    dcc.Interval(id="auto-refresh", interval=60*1000, n_intervals=0)  # Every 60 seconds
 
 ], fluid=True, className="py-5 bg-light")
 
 # ================= CALLBACKS =================
 @callback(
-    Output("kpi-row", "children"),
-    Output("cpu-trend", "figure"),
-    Output("ram-trend", "figure"),
-    Output("storage-trend", "figure"),
-    Output("recent-events", "children"),
-    Output("event-table", "children"),
-    Output("inventory-table", "children"),
-    Output("msg", "children"),
-    Output("csv-msg", "children"),
-    Input("submit", "n_clicks"),
-    Input("csv-upload", "contents"),
-    State("server", "value"),
-    State("cpu", "value"),
-    State("ram", "value"),
-    State("storage", "value"),
-    State("csv-upload", "filename"),
+    [
+        Output("kpi-row", "children"),
+        Output("cpu-trend", "figure"),
+        Output("ram-trend", "figure"),
+        Output("storage-trend", "figure"),
+        Output("recent-events", "children"),
+        Output("event-table", "children"),
+        Output("inventory-table", "children"),
+        Output("msg", "children"),
+        Output("csv-msg", "children"),
+    ],
+    [
+        Input("submit", "n_clicks"),
+        Input("csv-upload", "contents"),
+        Input("refresh-btn", "n_clicks"),
+        Input("auto-refresh", "n_intervals"),
+    ],
+    [
+        State("server", "value"),
+        State("cpu", "value"),
+        State("ram", "value"),
+        State("storage", "value"),
+        State("csv-upload", "filename"),
+    ],
     prevent_initial_call=False
 )
-def master_callback(submit_clicks, csv_contents, server, cpu, ram, storage, csv_filename):
+def master_callback(submit_clicks, csv_contents, refresh_clicks, auto_n, server, cpu, ram, storage, csv_filename):
     ctx = callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
@@ -282,7 +301,7 @@ def master_callback(submit_clicks, csv_contents, server, cpu, ram, storage, csv_
                         INSERT INTO capacity_events (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source)
                         VALUES (:s, :c, :r, :st, 'MANUAL')
                     """), {"s": server, "c": float(cpu or 0), "r": float(ram or 0), "st": float(storage or 0)})
-                msg_alert = dbc.Alert("Saved", color="success")
+                msg_alert = dbc.Alert("Event saved", color="success")
             except Exception as e:
                 msg_alert = dbc.Alert(f"Error: {str(e)}", color="danger")
 
@@ -325,9 +344,11 @@ def master_callback(submit_clicks, csv_contents, server, cpu, ram, storage, csv_
 
     recent_df = pd.read_sql("SELECT * FROM capacity_events ORDER BY event_time DESC LIMIT 10", ENGINE).fillna("NA")
     events_df = pd.read_sql("SELECT * FROM capacity_events ORDER BY event_time DESC LIMIT 100", ENGINE).fillna("NA")
-    # Inventory: only specified columns + NA
+    # Inventory: specified columns, servermemory to GB
     inv_df = pd.read_sql("""
-        SELECT assetuniquename, assetipaddress, servercores, servermemory, totaldisk, assetstatus
+        SELECT assetuniquename, assetipaddress, servercores, 
+               (NULLIF(TRIM(servermemory), '')::numeric / 1024.0)::text AS servermemory_gb, 
+               totaldisk, assetstatus
         FROM inventory ORDER BY assetuniquename
     """, ENGINE).fillna("NA")
 
