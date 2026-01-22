@@ -1,14 +1,21 @@
-```python
-# app.py
+# app.py - Full Capacity Management Dashboard Code
+# Run with: python app.py
+# Open: http://localhost:8050
+# Requirements: pip install dash dash-bootstrap-components plotly pandas sqlalchemy psycopg2-binary
+
 import base64
 import io
 import pandas as pd
 import plotly.express as px
 from sqlalchemy import create_engine, text
-from dash import Dash, dcc, html, Input, Output, State, callback, no_update
-import dash_bootstrap_components as dbc
-from config import DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
 from datetime import datetime, timedelta
+
+# ── Dash imports ────────────────────────────────────────────────
+from dash import Dash, dcc, html, Input, Output, State, callback, no_update
+from dash import callback_context  # Fixed the NameError
+import dash_bootstrap_components as dbc
+
+from config import DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
 
 # ================= DB CONNECTION =================
 ENGINE = create_engine(
@@ -131,7 +138,7 @@ def build_trend(resource):
             ORDER BY d
         """, ENGINE, params={"r": resource, "start_date": thirty_days_ago})
 
-        # Fill missing dates
+        # Fill missing dates with 0 delta
         date_range = pd.date_range(start=thirty_days_ago, end=today)
         df = df.set_index('d').reindex(date_range).fillna(0).reset_index()
         df.columns = ['d', 'v']  # Rename after reindex
@@ -160,21 +167,21 @@ def build_trend(resource):
         return px.area(pd.DataFrame({"d":[], "used":[]}), title="No data")
 
 # ================= DASH APP =================
-app = Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+app = Dash(__name__, external_stylesheets=[dbc.themes.LUX])  # Changed to LUX for better visibility (light theme, industry standard)
 app.title = "Capacity Management Dashboard"
 
 app.layout = dbc.Container([
     html.H1("Capacity Management Dashboard",
-            className="text-center text-primary mb-5 mt-3",
-            style={"fontWeight": "bold", "letterSpacing": "1px"}),
+            className="text-center mb-5 mt-3",
+            style={"fontWeight": "bold", "letterSpacing": "1px", "color": "#2c3e50", "fontFamily": "Arial, sans-serif"}),
 
     dbc.Tabs([
         # ── DASHBOARD TAB ───────────────────────────────────────
         dbc.Tab(label="Dashboard", tab_id="dashboard", children=[
-            html.H4("Capacity Overview", className="text-center text-info mt-4 mb-4"),
+            html.H4("Capacity Overview", className="text-center text-primary mt-4 mb-4", style={"fontFamily": "Arial, sans-serif"}),
             dbc.Row(id="kpi-row", className="mb-5 g-4 justify-content-center"),
 
-            html.H4("Usage Trends (Last 30 Days)", className="text-center text-info mt-4 mb-4"),
+            html.H4("Usage Trends (Last 30 Days)", className="text-center text-primary mt-4 mb-4", style={"fontFamily": "Arial, sans-serif"}),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="cpu-trend"), md=4),
                 dbc.Col(dcc.Graph(id="ram-trend"), md=4),
@@ -187,28 +194,28 @@ app.layout = dbc.Container([
             dbc.Row([
                 # Left column - Form
                 dbc.Col([
-                    html.H4("Add Event", className="text-success mb-4"),
+                    html.H4("Add Event", className="text-primary mb-4", style={"fontFamily": "Arial, sans-serif"}),
                     dbc.Form([
-                        dbc.Label("Server Name (required)", className="text-light"),
+                        dbc.Label("Server Name (required)", className="text-dark"),
                         dbc.Input(id="server", placeholder="e.g. srv-001", className="mb-3"),
 
-                        dbc.Label("CPU Δ (cores, optional)", className="text-light"),
+                        dbc.Label("CPU Δ (cores, optional)", className="text-dark"),
                         dbc.Input(id="cpu", type="number", placeholder="positive = add, negative = remove", className="mb-3"),
 
-                        dbc.Label("RAM Δ (GB, optional)", className="text-light"),
+                        dbc.Label("RAM Δ (GB, optional)", className="text-dark"),
                         dbc.Input(id="ram", type="number", placeholder="+ add / - remove GB", className="mb-3"),
 
-                        dbc.Label("Storage Δ (GB, optional)", className="text-light"),
+                        dbc.Label("Storage Δ (GB, optional)", className="text-dark"),
                         dbc.Input(id="storage", type="number", placeholder="+ add / - remove GB", className="mb-3"),
 
-                        dbc.Button("Save Event", id="submit", color="success", className="w-100 mt-2 py-2", n_clicks=0),
+                        dbc.Button("Save Event", id="submit", color="primary", className="w-100 mt-2 py-2", n_clicks=0),
                     ]),
 
                     html.Div(id="msg", className="mt-4"),
 
                     html.Hr(className="my-4 bg-secondary"),
 
-                    html.H5("Bulk Upload (CSV)", className="text-info mb-3"),
+                    html.H5("Bulk Upload (CSV)", className="text-primary mb-3", style={"fontFamily": "Arial, sans-serif"}),
                     html.P("Columns: date,server,cpu,ram,storage (date=YYYY-MM-DD)", className="text-muted small"),
                     dcc.Upload(
                         id="csv-upload",
@@ -217,14 +224,14 @@ app.layout = dbc.Container([
                         multiple=False
                     ),
                     html.Div(id="csv-msg", className="mt-3")
-                ], lg=4, className="bg-dark bg-opacity-75 p-4 rounded-3 shadow"),
+                ], lg=4, className="p-4 rounded-3 shadow bg-light"),
 
                 # Right column - Tables
                 dbc.Col([
-                    html.H5("Recent Events (last 10)", className="text-warning mb-3"),
+                    html.H5("Recent Events (last 10)", className="text-primary mb-3", style={"fontFamily": "Arial, sans-serif"}),
                     html.Div(id="recent-events", className="mb-4"),
 
-                    html.H5("All Events", className="text-warning mb-3"),
+                    html.H5("All Events", className="text-primary mb-3", style={"fontFamily": "Arial, sans-serif"}),
                     html.Div(id="event-table")
                 ], lg=8)
             ], className="g-4 mt-3")
@@ -232,15 +239,16 @@ app.layout = dbc.Container([
 
         # ── INVENTORY TAB ───────────────────────────────────────
         dbc.Tab(label="Inventory", tab_id="inventory", children=[
-            html.H4("Server Inventory (Read-Only)", className="text-center text-success mt-4 mb-4"),
+            html.H4("Server Inventory (Read-Only)", className="text-center text-primary mt-4 mb-4", style={"fontFamily": "Arial, sans-serif"}),
             html.Div(id="inventory-table", className="shadow")
         ])
     ], className="mb-5 shadow")
 
 ], fluid=True, className="px-4 py-3", style={
-    "background": "linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)",
+    "backgroundColor": "#f8f9fa",  # Light background for better visibility
     "minHeight": "100vh",
-    "color": "#e0e0ff"
+    "fontFamily": "Arial, sans-serif",  # Industry standard font
+    "color": "#333"  # Dark text for contrast
 })
 
 # ================= CALLBACKS =================
@@ -272,7 +280,7 @@ app.layout = dbc.Container([
 def master_callback(submit_clicks, csv_contents,
                     server, cpu, ram, storage, csv_filename):
     
-    ctx = dash.callback_context
+    ctx = callback_context  # Fixed: Use callback_context directly
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
 
     msg_alert = no_update
@@ -329,30 +337,29 @@ def master_callback(submit_clicks, csv_contents,
     # 3. Always refresh data
     cap = calculate_capacity()
     kpi_cards = []
-    for res, color in [("CPU", "primary"), ("RAM", "info"), ("STORAGE", "warning")]:
+    for res, color in [("CPU", "primary"), ("RAM", "info"), ("STORAGE", "success")]:
         d = cap[res]
         bar_color = "danger" if d["pct"] > 85 else "warning" if d["pct"] > 60 else color
         kpi_cards.append(dbc.Col(
             dbc.Card([
+                dbc.CardHeader(html.H5(res, className="mb-0", style={"fontFamily": "Arial, sans-serif"})),
                 dbc.CardBody([
-                    html.H5(res, className="text-uppercase mb-2"),
-                    html.H3(fmt(d["used"], res), className="mb-1"),
-                    html.P(f"Total: {fmt(d['total'], res)}", className="mb-0 small"),
-                    html.P(f"Reserved: {fmt(d['reserved'], res)}", className="mb-0 small"),
-                    html.P(f"Usable: {fmt(d['usable'], res)}", className="mb-0 small"),
-                    html.P(f"Available: {fmt(d['available'], res)}", className="mb-0 small"),
-                    html.P(f"Used: {fmt(d['used'], res)}", className="mb-2 small"),
+                    html.P(f"Total: {fmt(d['total'], res)}", className="mb-1"),
+                    html.P(f"Reserved: {fmt(d['reserved'], res)}", className="mb-1"),
+                    html.P(f"Usable: {fmt(d['usable'], res)}", className="mb-1"),
+                    html.P(f"Available: {fmt(d['available'], res)}", className="mb-1"),
+                    html.P(f"Used: {fmt(d['used'], res)}", className="mb-2"),
                     dbc.Progress(
                         value=min(d["pct"], 100),
                         color=bar_color,
                         striped=True,
                         animated=d["pct"] > 80,
-                        style={"height": "24px"},
+                        style={"height": "20px"},
                         className="mb-2"
                     ),
                     html.Small(f"Utilization: {d['pct']:.1f}%", className="fw-bold")
                 ], className="text-center")
-            ], className=f"shadow border-0 bg-gradient bg-opacity-25 bg-{color}"),
+            ], className="shadow border-0"),
             lg=4, md=6, className="mb-4"
         ))
 
@@ -394,9 +401,9 @@ def master_callback(submit_clicks, csv_contents,
         ORDER BY assetuniquename
     """, ENGINE)
 
-    recent_table = dbc.Table.from_dataframe(recent_df, striped=True, hover=True, responsive=True, className="table-dark table-sm") if not recent_df.empty else html.Div("No recent events", className="text-center text-muted p-4")
-    events_table = dbc.Table.from_dataframe(events_df,  striped=True, hover=True, responsive=True, className="table-dark table-sm") if not events_df.empty  else html.Div("No events", className="text-center text-muted p-4")
-    inv_table    = dbc.Table.from_dataframe(inv_df,     striped=True, hover=True, responsive=True, className="table-dark table-sm") if not inv_df.empty     else html.Div("No inventory data", className="text-center text-muted p-4")
+    recent_table = dbc.Table.from_dataframe(recent_df, striped=True, hover=True, responsive=True, className="table table-hover") if not recent_df.empty else html.Div("No recent events", className="text-center text-muted p-4")
+    events_table = dbc.Table.from_dataframe(events_df,  striped=True, hover=True, responsive=True, className="table table-hover") if not events_df.empty  else html.Div("No events", className="text-center text-muted p-4")
+    inv_table    = dbc.Table.from_dataframe(inv_df,     striped=True, hover=True, responsive=True, className="table table-hover") if not inv_df.empty     else html.Div("No inventory data", className="text-center text-muted p-4")
 
     return (
         kpi_cards,
@@ -413,4 +420,3 @@ def master_callback(submit_clicks, csv_contents,
 # ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
-```
