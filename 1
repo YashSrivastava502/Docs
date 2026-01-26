@@ -1,19 +1,9 @@
-#!/usr/bin/env python3
-"""
-main.py - Capacity Management Dashboard (Pro Edition v2)
-
-Features:
-- Fixed Trend Data (Shows all history).
-- Enhanced Events Tab (Mini KPIs, Badges, Better Layout).
-- Inventory & Settings preserved.
-- Auto-Refresh & Reconciler Logic intact.
-"""
-
 import os
 import io
 import base64
 import threading
 import time
+import random
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -92,7 +82,6 @@ def detect_and_convert_ram_sum_to_gb(raw_sum, raw_max, baseline_gb):
 
 # --- CORE LOGIC ---
 def calculate_capacity():
-    # 1. Baseline
     try:
         inv = pd.read_sql(text("""
             SELECT COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric),0) AS cpu,
@@ -103,10 +92,6 @@ def calculate_capacity():
         base_cpu = float(inv["cpu"].iloc[0]); base_ram = float(inv["ram_gb"].iloc[0]); base_stg = float(inv["storage_gb"].iloc[0])
     except: base_cpu = base_ram = base_stg = 0.0
 
-    # 2. Events (Pending only for KPI to show "Active" demand, or All? Usually Capacity = Base + All Deltas)
-    # The dashboard logic assumes Inventory is STATIC snapshot. So we add ALL non-reconciled events?
-    # Actually, to be safe, if the inventory table isn't updated by the script, we should sum ALL events to get "Total Used".
-    # But let's stick to the previous logic for consistency: Base + Pending.
     try:
         ev = pd.read_sql(text("""
             SELECT COALESCE(SUM(cpu_delta) FILTER (WHERE reconciled = false), 0) AS cpu_sum,
@@ -136,9 +121,10 @@ def calculate_capacity():
     }
 
 def build_trend(resource):
-    # FIXED: Removed "reconciled = false" filter.
-    # Shows TOTAL demand (Base + All Events) over time.
+    # FIXED: Robust Date Merging to ensure graph lines always appear
     today = datetime.today().date(); start = today - timedelta(days=30)
+    
+    # 1. Baseline
     try:
         inv = pd.read_sql(text(f"""
             SELECT COALESCE(SUM(NULLIF(TRIM({'servercores' if resource=='CPU' else ('servermemory' if resource=='RAM' else 'totaldisk')}), '')::numeric){'/1024.0' if resource=='RAM' else ''} AS v 
@@ -147,31 +133,43 @@ def build_trend(resource):
         base = float(inv["v"].iloc[0])
     except: base = 0.0
 
+    # 2. Fetch Events
     try:
-        # Fetch ALL events in window to show history
         df = pd.read_sql(text("""
             SELECT DATE(event_time) AS d, SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) ELSE COALESCE(storage_delta_gb,0) END) AS v
             FROM capacity_events WHERE event_time >= :st GROUP BY d ORDER BY d
         """), ENGINE, params={"r": resource, "st": start})
-    except: df = pd.DataFrame()
+    except: df = pd.DataFrame(columns=["d", "v"])
 
-    date_range = pd.date_range(start, today)
-    if df.empty: df = pd.DataFrame({"d": date_range, "v": 0.0})
+    # 3. Robust Merge Logic
+    # Create the perfect date range dataframe
+    full_range = pd.DataFrame({"d": pd.date_range(start, today)})
+    full_range["d"] = full_range["d"].dt.date # Ensure just Date object
+
+    if not df.empty:
+        # Ensure DB data is also Date object (not string/datetime)
+        df["d"] = pd.to_datetime(df["d"]).dt.date
+        # Merge: Left join ensures all 30 days exist, fill missing with 0
+        merged = pd.merge(full_range, df, on="d", how="left").fillna(0)
     else:
-        df["d"] = pd.to_datetime(df["d"])
-        df = df.set_index("d").reindex(date_range).fillna(0).reset_index().rename(columns={"index": "d"})
-    
-    if resource == "RAM":
-        if df["v"].abs().max() > (abs(base)*10 if base>0 else 5000): df["v"] /= 1024.0
+        full_range["v"] = 0.0
+        merged = full_range
 
-    df["used"] = base + df["v"].cumsum()
+    # 4. Handle RAM Unit issues
+    if resource == "RAM":
+        if merged["v"].abs().max() > (abs(base)*10 if base>0 else 5000): merged["v"] /= 1024.0
+
+    # 5. Calculate CumSum
+    merged["used"] = base + merged["v"].cumsum()
+
+    # 6. Formatting
     col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
-    y_val = df["used"]/1024.0 if resource == "STORAGE" else df["used"]
+    y_val = merged["used"]/1024.0 if resource == "STORAGE" else merged["used"]
     y_base = base/1024.0 if resource == "STORAGE" else base
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["d"], y=y_val, mode="lines", line=dict(color=col, width=3, shape='spline'), fill="tozeroy", fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", hovertemplate='%{y:.2f}<extra></extra>'))
-    fig.add_trace(go.Scatter(x=[df["d"].iloc[0], df["d"].iloc[-1]], y=[y_base, y_base], mode="lines", line=dict(color="gray", dash="dot"), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=merged["d"], y=y_val, mode="lines", line=dict(color=col, width=3, shape='spline'), fill="tozeroy", fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", hovertemplate='%{y:.2f}<extra></extra>'))
+    fig.add_trace(go.Scatter(x=[merged["d"].iloc[0], merged["d"].iloc[-1]], y=[y_base, y_base], mode="lines", line=dict(color="gray", dash="dot"), hoverinfo="skip"))
     fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Total ({'TB' if resource=='STORAGE' else ('GB' if resource=='RAM' else 'Cores')})"), showlegend=False)
     return fig
 
@@ -227,6 +225,23 @@ def delete_event(event_id):
         return True if res.rowcount > 0 else False
     except: return False
 
+def generate_demo_data():
+    try:
+        # Generate 30 days of random events
+        today = datetime.now()
+        servers = ["web-01", "db-01", "app-02", "cache-01", "auth-01"]
+        with ENGINE.begin() as conn:
+            for i in range(30):
+                dt = today - timedelta(days=i)
+                srv = random.choice(servers)
+                cpu = random.randint(-4, 8)
+                ram = random.randint(-8, 32)
+                stg = random.randint(0, 100)
+                conn.execute(text("INSERT INTO capacity_events (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time, pending_inventory, reconciled) VALUES (:s, :c, :r, :st, 'DEMO', :et, true, false)"),
+                             {"s":srv, "c":cpu, "r":ram, "st":stg, "et":dt})
+        return True
+    except: return False
+
 # --- LAYOUT ---
 app = Dash(__name__, external_stylesheets=[dbc.themes.ZEPHYR, "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css"], suppress_callback_exceptions=True)
 app.title = "Capacity Manager Pro"
@@ -252,9 +267,9 @@ app.index_string = '''
         .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
         .col-ip { width: 140px; font-family: monospace; color: #0d6efd; }
         
-        /* Event Badges */
         .badge-manual { background-color: #e7f1ff; color: #0d6efd; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
         .badge-csv { background-color: #e6fcf5; color: #0ca678; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+        .badge-demo { background-color: #fff3bf; color: #f08c00; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
         .badge-pending { color: #fcc419; }
         .badge-reconciled { color: #20c997; }
     </style>
@@ -306,11 +321,8 @@ view_dash = html.Div(id="view-dash", children=[
 ])
 
 view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
-    # Top Stats Row
     dbc.Row(id="event-stats", className="mb-4 g-4"),
-    
     dbc.Row([
-        # Left Actions Panel
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader([html.I(className="bi bi-gear-wide-connected me-2"), "Actions"], className="bg-white border-0 fw-bold"),
@@ -319,11 +331,7 @@ view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
                         dbc.Tab(label="Manual Add", children=[
                             html.Div([
                                 dbc.Input(id="server", placeholder="Server Name (e.g. web-01)", className="mb-2 mt-3"),
-                                dbc.Row([
-                                    dbc.Col(dbc.Input(id="cpu", type="number", placeholder="CPU")),
-                                    dbc.Col(dbc.Input(id="ram", type="number", placeholder="RAM GB")),
-                                    dbc.Col(dbc.Input(id="stg", type="number", placeholder="Stg GB"))
-                                ], className="mb-3 g-2"),
+                                dbc.Row([dbc.Col(dbc.Input(id="cpu", type="number", placeholder="CPU")), dbc.Col(dbc.Input(id="ram", type="number", placeholder="RAM GB")), dbc.Col(dbc.Input(id="stg", type="number", placeholder="Stg GB"))], className="mb-3 g-2"),
                                 dbc.Button("Submit Event", id="submit", color="primary", className="w-100"),
                                 html.Div(id="man-msg", className="mt-2")
                             ])
@@ -335,10 +343,7 @@ view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
                         dbc.Tab(label="Delete", children=[
                             html.Div([
                                 html.P("Remove erroneous entries by ID.", className="text-muted small mt-3"),
-                                dbc.InputGroup([
-                                    dbc.Input(id="del-id", placeholder="Event ID", type="number"),
-                                    dbc.Button("Delete", id="btn-del", color="danger")
-                                ]),
+                                dbc.InputGroup([dbc.Input(id="del-id", placeholder="Event ID", type="number"), dbc.Button("Delete", id="btn-del", color="danger")]),
                                 html.Div(id="del-msg", className="mt-2 small")
                             ])
                         ])
@@ -346,8 +351,6 @@ view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
                 ])
             ], className="custom-card h-100")
         ], lg=4),
-        
-        # Right Table Panel
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader([
@@ -376,7 +379,10 @@ view_set = html.Div(id="view-set", style={"display": "none"}, children=[
                 dbc.Row([dbc.Col("DB:", width=4, className="fw-bold"), dbc.Col(DB_CONFIG['dbname'])]),
                 dbc.Row([dbc.Col("User:", width=4, className="fw-bold"), dbc.Col(f"{DB_CONFIG['user'][0]}***")]),
                 html.Hr(),
-                dbc.Button("Test Reconcile Now", id="btn-force-rec", color="warning", size="sm")
+                dbc.Button("Test Reconcile Now", id="btn-force-rec", color="warning", size="sm"),
+                html.Hr(),
+                dbc.Button("Generate Demo Data (30 Days)", id="btn-demo", color="info", size="sm"),
+                html.Div(id="demo-msg", className="mt-2 small fw-bold text-success")
             ])
         ], className="custom-card"), md=6),
         dbc.Col(dbc.Card([
@@ -415,17 +421,18 @@ def nav(b1, b2, b3, b4):
 
 @app.callback(
     [Output("kpi-row", "children"), Output("alert-box", "children"), Output("cpu-trend", "figure"), Output("ram-trend", "figure"), Output("storage-trend", "figure"),
-     Output("event-table", "children"), Output("event-stats", "children"), Output("inv-table", "children"), Output("man-msg", "children"), Output("csv-msg", "children"), Output("del-msg", "children"),
-     Output("set-msg", "children"), Output("download-csv", "data"), Output("last-sync", "children")],
+     Output("event-table", "children"), Output("event-stats", "children"), Output("inv-table", "children"), 
+     Output("man-msg", "children"), Output("csv-msg", "children"), Output("del-msg", "children"), Output("set-msg", "children"), Output("demo-msg", "children"),
+     Output("download-csv", "data"), Output("last-sync", "children")],
     [Input("timer", "n_intervals"), Input("refresh", "n_clicks"), Input("submit", "n_clicks"), Input("csv-up", "contents"), 
      Input("btn-del", "n_clicks"), Input("date-filter", "start_date"), Input("date-filter", "end_date"),
-     Input("btn-export", "n_clicks"), Input("btn-force-rec", "n_clicks"), Input("btn-update-th", "n_clicks")],
+     Input("btn-export", "n_clicks"), Input("btn-force-rec", "n_clicks"), Input("btn-update-th", "n_clicks"), Input("btn-demo", "n_clicks")],
     [State("server", "value"), State("cpu", "value"), State("ram", "value"), State("stg", "value"), State("csv-up", "filename"), State("del-id", "value"),
      State("t-cpu", "value"), State("t-ram", "value"), State("t-pct", "value")]
 )
-def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th, srv, cpu, ram, stg, fname, del_id, t_cpu, t_ram, t_pct):
+def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th, n_demo, srv, cpu, ram, stg, fname, del_id, t_cpu, t_ram, t_pct):
     ctx = callback_context; trig = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
-    m_msg = c_msg = d_msg = s_msg = dl_data = no_update
+    m_msg = c_msg = d_msg = s_msg = dem_msg = dl_data = no_update
     force = False
 
     if trig == "submit" and n_sub:
@@ -457,6 +464,10 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
 
     if trig == "btn-update-th":
         GLOBAL_THRESHOLDS.update({"cpu_abs":t_cpu, "ram_mb_abs":t_ram, "pct_tolerance":t_pct}); s_msg = "Thresholds Updated"
+    
+    if trig == "btn-demo":
+        if generate_demo_data(): dem_msg = "Demo Data Added!"; force = True
+        else: dem_msg = "Error generating data"
 
     if force or trig in ("timer", "refresh", "date-filter", "btn-export", ""):
         cap = calculate_capacity()
@@ -472,36 +483,16 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
         ev_tbl = html.Div("No events in range", className="text-muted p-3")
         estats_cols = []
         try:
-            # Stats (All Time / or Window?) - Let's do window
-            stats_q = "SELECT COUNT(*) as tot, COUNT(*) FILTER (WHERE pending_inventory) as pend FROM capacity_events WHERE event_time BETWEEN :s AND :e"
             e_range_end = str(datetime.strptime(d_end, '%Y-%m-%d') + timedelta(days=1))
-            stats = pd.read_sql(text(stats_q), ENGINE, params={"s": d_start, "e": e_range_end})
+            stats = pd.read_sql(text("SELECT COUNT(*) as tot, COUNT(*) FILTER (WHERE pending_inventory) as pend FROM capacity_events WHERE event_time BETWEEN :s AND :e"), ENGINE, params={"s": d_start, "e": e_range_end})
             tot = stats.iloc[0]['tot']; pend = stats.iloc[0]['pend']
-            estats_cols = [
-                dbc.Col(mini_stat_card("Total Events", tot, "primary"), md=6),
-                dbc.Col(mini_stat_card("Pending Reconcile", pend, "warning"), md=6)
-            ]
+            estats_cols = [dbc.Col(mini_stat_card("Total Events", tot, "primary"), md=6), dbc.Col(mini_stat_card("Pending Reconcile", pend, "warning"), md=6)]
 
-            # Table
-            q = "SELECT id, event_time, source, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, reconciled FROM capacity_events WHERE event_time BETWEEN :s AND :e ORDER BY event_time DESC LIMIT 500"
-            ev_df = pd.read_sql(text(q), ENGINE, params={"s": d_start, "e": e_range_end})
+            ev_df = pd.read_sql(text("SELECT id, event_time, source, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, reconciled FROM capacity_events WHERE event_time BETWEEN :s AND :e ORDER BY event_time DESC LIMIT 500"), ENGINE, params={"s": d_start, "e": e_range_end})
             if not ev_df.empty:
-                # Add Badges
-                def make_badge(src): return html.Span(src, className="badge-manual") if src=="MANUAL" else html.Span(src, className="badge-csv")
+                def make_badge(src): return html.Span(src, className="badge-manual" if src=="MANUAL" else ("badge-demo" if src=="DEMO" else "badge-csv"))
                 def make_status(r): return html.I(className="bi bi-check-circle-fill badge-reconciled") if r else html.I(className="bi bi-clock-history badge-pending")
-                
-                rows = []
-                for _, r in ev_df.iterrows():
-                    rows.append(html.Tr([
-                        html.Td(r["id"]),
-                        html.Td(str(r["event_time"])[:16]),
-                        html.Td(make_badge(r["source"])),
-                        html.Td(r["assetuniquename"]),
-                        html.Td(r["cpu_delta"]),
-                        html.Td(f"{r['ram_delta_gb']:.1f}"),
-                        html.Td(r["storage_delta_gb"]),
-                        html.Td(make_status(r["reconciled"]), className="text-center")
-                    ]))
+                rows = [html.Tr([html.Td(r["id"]), html.Td(str(r["event_time"])[:16]), html.Td(make_badge(r["source"])), html.Td(r["assetuniquename"]), html.Td(r["cpu_delta"]), html.Td(f"{r['ram_delta_gb']:.1f}"), html.Td(r["storage_delta_gb"]), html.Td(make_status(r["reconciled"]), className="text-center")]) for _, r in ev_df.iterrows()]
                 header = [html.Th("ID"), html.Th("Time"), html.Th("Source"), html.Th("Server"), html.Th("CPU"), html.Th("RAM"), html.Th("Stg"), html.Th("Sts")]
                 ev_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
@@ -509,19 +500,17 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
         # Inventory
         inv_tbl = html.P("No Inventory Data")
         try:
-            inv_q = "SELECT assetuniquename AS \"Server\", assetipaddress AS \"IP\", assetstatus AS \"Status\", servercores AS \"CPU\", ROUND(COALESCE(NULLIF(TRIM(servermemory),''),'0')::numeric/1024.0, 2) AS \"RAM (GB)\", totaldisk AS \"Storage (GB)\" FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at"
-            inv_df = pd.read_sql(text(inv_q), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
+            inv_df = pd.read_sql(text("SELECT assetuniquename AS \"Server\", assetipaddress AS \"IP\", assetstatus AS \"Status\", servercores AS \"CPU\", ROUND(COALESCE(NULLIF(TRIM(servermemory),''),'0')::numeric/1024.0, 2) AS \"RAM (GB)\", totaldisk AS \"Storage (GB)\" FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at"), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
             if trig == "btn-export" and not inv_df.empty: dl_data = dcc.send_data_frame(inv_df.to_csv, "inventory_export.csv")
             if not inv_df.empty:
                 inv_df["Status"] = inv_df["Status"].apply(lambda s: html.Span([html.Span(className=f"status-dot bg-{'success' if 'Running' in s else 'secondary'}"), s]))
-                header = [html.Th(c) for c in inv_df.columns]
-                rows = [html.Tr([html.Td(r["Server"]), html.Td(r["IP"], className="col-ip"), html.Td(r["Status"]), html.Td(r["CPU"]), html.Td(r["RAM (GB)"]), html.Td(r["Storage (GB)"])]) for _, r in inv_df.iterrows()]
+                header = [html.Th(c) for c in inv_df.columns]; rows = [html.Tr([html.Td(r["Server"]), html.Td(r["IP"], className="col-ip"), html.Td(r["Status"]), html.Td(r["CPU"]), html.Td(r["RAM (GB)"]), html.Td(r["Storage (GB)"])]) for _, r in inv_df.iterrows()]
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
+        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dem_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
-    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
+    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, dem_msg, no_update, no_update
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
