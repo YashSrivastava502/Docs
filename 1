@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+"""
+main.py - Capacity Management Dashboard (Final Stable Production)
+
+Logic: Trend Graphs show "Total Demand" (Baseline + All Historical Events).
+Features:
+- Robust Error Handling (No crashes on empty DB).
+- Auto-Reconciler (Background Thread).
+- Event Management (Add/Delete/CSV).
+- Professional Sidebar UI.
+"""
+
 import os
 import io
 import base64
@@ -81,6 +93,7 @@ def detect_and_convert_ram_sum_to_gb(raw_sum, raw_max, baseline_gb):
 
 # --- CORE LOGIC ---
 def calculate_capacity():
+    # 1. Baseline Inventory
     try:
         inv = pd.read_sql(text("""
             SELECT COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric),0) AS cpu,
@@ -88,9 +101,18 @@ def calculate_capacity():
                    COALESCE(SUM(NULLIF(TRIM(totaldisk), '')::numeric),0) AS storage_gb
             FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation = :loc AND assettype = :atype
         """), ENGINE, params={"s1": INVENTORY_STATUS[0], "s2": INVENTORY_STATUS[1], "loc": INVENTORY_LOCATION, "atype": INVENTORY_TYPE})
-        base_cpu = float(inv["cpu"].iloc[0]); base_ram = float(inv["ram_gb"].iloc[0]); base_stg = float(inv["storage_gb"].iloc[0])
-    except: base_cpu = base_ram = base_stg = 0.0
+        if not inv.empty:
+            base_cpu = float(inv["cpu"].iloc[0] or 0)
+            base_ram = float(inv["ram_gb"].iloc[0] or 0)
+            base_stg = float(inv["storage_gb"].iloc[0] or 0)
+        else:
+            base_cpu = base_ram = base_stg = 0.0
+    except Exception:
+        base_cpu = base_ram = base_stg = 0.0
 
+    # 2. Events (Pending Only for KPI 'Used')
+    # For the KPI cards, we usually want "Current Used". 
+    # Current Used = Baseline + Pending Events (that haven't been added to baseline yet).
     try:
         ev = pd.read_sql(text("""
             SELECT COALESCE(SUM(cpu_delta) FILTER (WHERE reconciled = false), 0) AS cpu_sum,
@@ -99,8 +121,15 @@ def calculate_capacity():
                    COALESCE(SUM(storage_delta_gb) FILTER (WHERE reconciled = false), 0) AS storage_sum
             FROM capacity_events
         """), ENGINE)
-        cpu_sum = float(ev["cpu_sum"].iloc[0]); ram_sum = float(ev["ram_sum_raw"].iloc[0]); ram_max = float(ev["ram_max_raw"].iloc[0]); stg_sum = float(ev["storage_sum"].iloc[0])
-    except: cpu_sum = ram_sum = ram_max = stg_sum = 0.0
+        if not ev.empty:
+            cpu_sum = float(ev["cpu_sum"].iloc[0] or 0)
+            ram_sum = float(ev["ram_sum_raw"].iloc[0] or 0)
+            ram_max = float(ev["ram_max_raw"].iloc[0] or 0)
+            stg_sum = float(ev["storage_sum"].iloc[0] or 0)
+        else:
+            cpu_sum = ram_sum = ram_max = stg_sum = 0.0
+    except Exception:
+        cpu_sum = ram_sum = ram_max = stg_sum = 0.0
 
     used_cpu = base_cpu + cpu_sum
     used_ram = base_ram + detect_and_convert_ram_sum_to_gb(ram_sum, ram_max, base_ram)
@@ -120,7 +149,7 @@ def calculate_capacity():
     }
 
 def build_trend(resource):
-    # LOGIC RESTORED: Baseline + Events(Reconciled=False)
+    # TREND LOGIC: BASELINE + ALL EVENTS (Total Growth)
     today = datetime.today().date(); start = today - timedelta(days=30)
     
     # 1. Baseline
@@ -129,18 +158,18 @@ def build_trend(resource):
             SELECT COALESCE(SUM(NULLIF(TRIM({'servercores' if resource=='CPU' else ('servermemory' if resource=='RAM' else 'totaldisk')}), '')::numeric){'/1024.0' if resource=='RAM' else ''} AS v 
             FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at
         """), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
-        base = float(inv["v"].iloc[0])
+        base = float(inv["v"].iloc[0] or 0)
     except: base = 0.0
 
-    # 2. Fetch Events (Only Pending/Unreconciled as requested)
+    # 2. Fetch All Events (Total History)
     try:
         df = pd.read_sql(text("""
             SELECT DATE(event_time) AS d, SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) ELSE COALESCE(storage_delta_gb,0) END) AS v
-            FROM capacity_events WHERE event_time >= :st AND reconciled = false GROUP BY d ORDER BY d
+            FROM capacity_events WHERE event_time >= :st GROUP BY d ORDER BY d
         """), ENGINE, params={"r": resource, "st": start})
     except: df = pd.DataFrame(columns=["d", "v"])
 
-    # 3. Robust Merge Logic (To keep the line visible even with date gaps)
+    # 3. Robust Merge
     full_range = pd.DataFrame({"d": pd.date_range(start, today)})
     full_range["d"] = full_range["d"].dt.date
 
@@ -152,6 +181,7 @@ def build_trend(resource):
         merged = full_range
 
     if resource == "RAM":
+        # Heuristic: If values are huge (>5000), assume MB and convert to GB
         if merged["v"].abs().max() > (abs(base)*10 if base>0 else 5000): merged["v"] /= 1024.0
 
     merged["used"] = base + merged["v"].cumsum()
@@ -237,7 +267,6 @@ app.index_string = '''
         .nav-pills .nav-link { font-weight: 500; color: #555; margin-bottom: 5px; transition: 0.2s; }
         .nav-pills .nav-link:hover { background: #f1f3f5; color: #000; }
         .nav-pills .nav-link.active { background: #e7f1ff; color: #0d6efd; font-weight: 700; }
-        
         .table-modern thead th { border-top: none; border-bottom: 2px solid #e9ecef; color: #495057; font-weight: 600; font-size: 0.9rem; }
         .table-modern tbody td { vertical-align: middle; border-color: #f1f3f5; font-size: 0.9rem; }
         .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
@@ -289,9 +318,9 @@ view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CPU Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("RAM Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("Storage Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("CPU Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("RAM Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("Storage Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
     ], className="g-4 mb-4")
 ])
 
@@ -458,7 +487,7 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
 
             ev_df = pd.read_sql(text("SELECT id, event_time, source, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, reconciled FROM capacity_events WHERE event_time BETWEEN :s AND :e ORDER BY event_time DESC LIMIT 500"), ENGINE, params={"s": d_start, "e": e_range_end})
             if not ev_df.empty:
-                def make_badge(src): return html.Span(src, className="badge-manual" if src=="MANUAL" else ("badge-demo" if src=="DEMO" else "badge-csv"))
+                def make_badge(src): return html.Span(src, className="badge-manual" if src=="MANUAL" else "badge-csv")
                 def make_status(r): return html.I(className="bi bi-check-circle-fill badge-reconciled") if r else html.I(className="bi bi-clock-history badge-pending")
                 rows = [html.Tr([html.Td(r["id"]), html.Td(str(r["event_time"])[:16]), html.Td(make_badge(r["source"])), html.Td(r["assetuniquename"]), html.Td(r["cpu_delta"]), html.Td(f"{r['ram_delta_gb']:.1f}"), html.Td(r["storage_delta_gb"]), html.Td(make_status(r["reconciled"]), className="text-center")]) for _, r in ev_df.iterrows()]
                 header = [html.Th("ID"), html.Th("Time"), html.Th("Source"), html.Th("Server"), html.Th("CPU"), html.Th("RAM"), html.Th("Stg"), html.Th("Sts")]
@@ -476,9 +505,9 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, no_update, dl_data, datetime.now().strftime("%H:%M:%S")
+        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
-    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update, no_update
+    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
