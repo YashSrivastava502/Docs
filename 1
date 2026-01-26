@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py - Capacity Management Dashboard (Pro Edition)
-
-Features:
-- Sidebar Navigation (Dashboard, Events, Inventory, Settings).
-- Auto-Refresh (60s).
-- KPI Cards with Total/Reserved/Available.
-- Date Range Filter for Events.
-- Delete Event Feature.
-- Fixed Column Widths & CSV Export.
-- Settings Tab to control Reconciler.
+main.py - Capacity Management Dashboard (Pro Edition - Fixed)
 """
 
 import os
@@ -60,7 +51,7 @@ INVENTORY_TYPE = "Server/VM"
 RECONCILE_INTERVAL = int(os.environ.get("RECONCILE_INTERVAL", "300"))
 RUN_RECONCILER = os.environ.get("RUN_RECONCILER", "true").lower() in ("true", "1", "yes")
 
-# Global Thresholds (modifiable via Settings)
+# Global Thresholds
 GLOBAL_THRESHOLDS = {"cpu_abs":1, "ram_mb_abs":512, "storage_gb_abs":5, "pct_tolerance":0.20}
 
 # ---------------- Styling Constants ----------------
@@ -148,7 +139,6 @@ def calculate_capacity():
     }
 
 def build_trend(resource):
-    # (Kept logic same as previous version)
     today = datetime.today().date(); start = today - timedelta(days=30)
     try:
         inv = pd.read_sql(text(f"""
@@ -175,7 +165,6 @@ def build_trend(resource):
         if df["v"].abs().max() > (abs(base)*10 if base>0 else 5000): df["v"] /= 1024.0
 
     df["used"] = base + df["v"].cumsum()
-    
     col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
     y_val = df["used"]/1024.0 if resource == "STORAGE" else df["used"]
     y_base = base/1024.0 if resource == "STORAGE" else base
@@ -186,43 +175,83 @@ def build_trend(resource):
     fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Used ({'TB' if resource=='STORAGE' else ('GB' if resource=='RAM' else 'Cores')})"), showlegend=False)
     return fig
 
-# ---------------- Reconciler ----------------
+# ---------------- Reconciler (Cleaned Up) ----------------
 _reconcile_lock = threading.Lock()
+
 def auto_reconcile_pending_events():
     matched = 0
     try:
         if not _reconcile_lock.acquire(blocking=False): return
-        df = pd.read_sql(text("SELECT id, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb FROM capacity_events WHERE pending_inventory = true AND reconciled = false"), ENGINE)
+        
+        # 1. Fetch pending events
+        df = pd.read_sql(text("""
+            SELECT id, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb 
+            FROM capacity_events 
+            WHERE pending_inventory = true AND reconciled = false
+        """), ENGINE)
+        
         for _, row in df.iterrows():
-            inv = pd.read_sql(text("SELECT servercores, servermemory, totaldisk FROM inventory WHERE assetuniquename = :s LIMIT 1"), ENGINE, params={"s": row["assetuniquename"]})
-            if inv.empty: continue
+            # 2. Fetch inventory for this specific server
+            inv = pd.read_sql(text("""
+                SELECT servercores, servermemory, totaldisk 
+                FROM inventory 
+                WHERE assetuniquename = :s LIMIT 1
+            """), ENGINE, params={"s": row["assetuniquename"]})
             
-            i_cpu = float(inv.iloc[0,0] or 0); i_ram = float(inv.iloc[0,1] or 0); i_stg = float(inv.iloc[0,2] or 0)
-            e_cpu = float(row["cpu_delta"] or 0); e_ram = float(row["ram_delta_gb"] or 0); e_stg = float(row["storage_delta_gb"] or 0)
+            if inv.empty:
+                continue
+            
+            # 3. Extract Values safely
+            i_cpu = float(inv.iloc[0]["servercores"] or 0)
+            i_ram = float(inv.iloc[0]["servermemory"] or 0)
+            i_stg = float(inv.iloc[0]["totaldisk"] or 0)
+            
+            e_cpu = float(row["cpu_delta"] or 0)
+            e_ram = float(row["ram_delta_gb"] or 0)
+            e_stg = float(row["storage_delta_gb"] or 0)
+            
+            # Normalize Event RAM to MB if needed
             e_ram_mb = e_ram if abs(e_ram) > 1024 else e_ram * 1024.0
             
             t = GLOBAL_THRESHOLDS
-            if (abs(e_cpu - i_cpu) <= t["cpu_abs"] or abs(e_cpu - i_cpu) <= t["pct_tolerance"]*i_cpu) and \
-               (abs(e_ram_mb - i_ram) <= t["ram_mb_abs"] or abs(e_ram_mb - i_ram) <= t["pct_tolerance"]*i_ram) and \
-               (abs(e_stg - i_stg) <= t["storage_gb_abs"] or abs(e_stg - i_stg) <= t["pct_tolerance"]*i_stg):
+            
+            # 4. Check Tolerances (Parentheses for safety, no backslashes)
+            cpu_match = (abs(e_cpu - i_cpu) <= t["cpu_abs"]) or (abs(e_cpu - i_cpu) <= t["pct_tolerance"] * i_cpu)
+            ram_match = (abs(e_ram_mb - i_ram) <= t["ram_mb_abs"]) or (abs(e_ram_mb - i_ram) <= t["pct_tolerance"] * i_ram)
+            stg_match = (abs(e_stg - i_stg) <= t["storage_gb_abs"]) or (abs(e_stg - i_stg) <= t["pct_tolerance"] * i_stg)
+
+            if cpu_match and ram_match and stg_match:
                 with ENGINE.begin() as conn:
                     conn.execute(text("UPDATE capacity_events SET reconciled=true, pending_inventory=false, reconciled_at=now() WHERE id=:id"), {"id": row["id"]})
                 matched += 1
         return matched
-    except Exception as e: logger.error(f"Reconcile error: {e}")
+    except Exception as e:
+        logger.error(f"Reconcile error: {e}")
     finally: 
-        if _reconcile_lock.locked(): _reconcile_lock.release()
+        if _reconcile_lock.locked():
+            _reconcile_lock.release()
 
 if RUN_RECONCILER:
-    threading.Thread(target=lambda: (time.sleep(5), [auto_reconcile_pending_events(), time.sleep(RECONCILE_INTERVAL) for _ in iter(int, 1)]), daemon=True).start()
+    # Safe thread starter without complex lambda
+    def run_recon_loop():
+        time.sleep(5)
+        while True:
+            auto_reconcile_pending_events()
+            time.sleep(RECONCILE_INTERVAL)
+    
+    t = threading.Thread(target=run_recon_loop, daemon=True)
+    t.start()
 
 def insert_event(server, cpu, ram_mb, storage_gb, source, date=None, pending=True):
     try:
         with ENGINE.begin() as conn:
-            conn.execute(text("INSERT INTO capacity_events (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time, pending_inventory, reconciled) VALUES (:s, :c, :r, :st, :src, :et, :p, false)"), 
-                         {"s": server, "c": cpu, "r": ram_mb, "st": storage_gb, "src": source, "et": date or now_utc(), "p": pending})
+            conn.execute(
+                text("INSERT INTO capacity_events (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time, pending_inventory, reconciled) VALUES (:s, :c, :r, :st, :src, :et, :p, false)"), 
+                {"s": server, "c": cpu, "r": ram_mb, "st": storage_gb, "src": source, "et": date or now_utc(), "p": pending}
+            )
         return True, "OK"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        return False, str(e)
 
 def delete_event(event_id):
     try:
@@ -250,13 +279,9 @@ app.index_string = '''
         .nav-pills .nav-link { font-weight: 500; color: #555; margin-bottom: 5px; transition: 0.2s; }
         .nav-pills .nav-link:hover { background: #f1f3f5; color: #000; }
         .nav-pills .nav-link.active { background: #e7f1ff; color: #0d6efd; font-weight: 700; }
-        
-        /* Table Styling */
         .table-modern thead th { border-top: none; border-bottom: 2px solid #e9ecef; color: #495057; font-weight: 600; font-size: 0.9rem; }
         .table-modern tbody td { vertical-align: middle; border-color: #f1f3f5; font-size: 0.9rem; }
         .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-        
-        /* IP Column Fix */
         .col-ip { width: 140px; font-family: monospace; color: #0d6efd; }
     </style>
     </head>
@@ -284,18 +309,11 @@ def kpi_card(title, used, total, reserved, avail, pct, color, icon):
                 dbc.Col(html.I(className=f"{icon} fs-2 text-{color} opacity-50"), width="auto")
             ]),
             dbc.Progress(value=min(pct, 100), color=color, style={"height": "6px"}, className="my-2"),
-            html.Div([
-                html.Span(f"Total: {total}"), 
-                html.Span(f"Rsvd: {reserved}")
-            ], className="kpi-detail"),
-            html.Div([
-                html.Span(f"Avail: {avail}", className=f"text-{color} fw-bold"),
-                html.Span(f"{pct:.1f}%", className="fw-bold")
-            ], className="kpi-detail border-0 pt-1")
+            html.Div([html.Span(f"Total: {total}"), html.Span(f"Rsvd: {reserved}")], className="kpi-detail"),
+            html.Div([html.Span(f"Avail: {avail}", className=f"text-{color} fw-bold"), html.Span(f"{pct:.1f}%", className="fw-bold")], className="kpi-detail border-0 pt-1")
         ])
     ], className="custom-card h-100")
 
-# --- VIEWS ---
 view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
@@ -331,10 +349,7 @@ view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
             dbc.Card([
                 dbc.CardHeader([html.I(className="bi bi-trash me-2"), "Delete Event"], className="bg-white border-0 fw-bold text-danger"),
                 dbc.CardBody([
-                    dbc.InputGroup([
-                        dbc.Input(id="del-id", placeholder="Event ID", type="number"),
-                        dbc.Button("Delete", id="btn-del", color="danger")
-                    ]),
+                    dbc.InputGroup([dbc.Input(id="del-id", placeholder="Event ID", type="number"), dbc.Button("Delete", id="btn-del", color="danger")]),
                     html.Div(id="del-msg", className="mt-2 small")
                 ])
             ], className="custom-card")
@@ -389,7 +404,6 @@ app.layout = html.Div([sidebar, html.Div([
     view_dash, view_events, view_inv, view_set
 ], className="content")])
 
-# ---------------- Callbacks ----------------
 @app.callback(
     [Output("view-dash", "style"), Output("view-ev", "style"), Output("view-inv", "style"), Output("view-set", "style"),
      Output("btn-dash", "active"), Output("btn-ev", "active"), Output("btn-inv", "active"), Output("btn-set", "active")],
@@ -419,7 +433,6 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
     m_msg = c_msg = d_msg = s_msg = dl_data = no_update
     force = False
 
-    # 1. Action Handling
     if trig == "submit" and n_sub:
         if not srv: m_msg = dbc.Alert("Server required", color="danger")
         else:
@@ -441,69 +454,45 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
         except Exception as e: c_msg = dbc.Alert(str(e), color="danger")
 
     if trig == "btn-del" and n_del and del_id:
-        if delete_event(del_id):
-            d_msg = dbc.Alert(f"Deleted ID {del_id}", color="success"); force = True
+        if delete_event(del_id): d_msg = dbc.Alert(f"Deleted ID {del_id}", color="success"); force = True
         else: d_msg = dbc.Alert("ID not found or Error", color="danger")
 
     if trig == "btn-force-rec":
-        m = auto_reconcile_pending_events()
-        s_msg = f"Reconciled {m} events"
-        force = True
+        m = auto_reconcile_pending_events(); s_msg = f"Reconciled {m} events"; force = True
 
     if trig == "btn-update-th":
-        GLOBAL_THRESHOLDS.update({"cpu_abs":t_cpu, "ram_mb_abs":t_ram, "pct_tolerance":t_pct})
-        s_msg = "Thresholds Updated"
+        GLOBAL_THRESHOLDS.update({"cpu_abs":t_cpu, "ram_mb_abs":t_ram, "pct_tolerance":t_pct}); s_msg = "Thresholds Updated"
 
-    # 2. Data Refresh
     if force or trig in ("timer", "refresh", "date-filter", "btn-export", ""):
         cap = calculate_capacity()
-        cards = []
-        alerts = []
-        for k, i, c in [("CPU","bi-cpu","primary"),("RAM","bi-memory","success"),("STORAGE","bi-hdd-network","storage")]: # Purple for storage
+        cards = []; alerts = []
+        for k, i, c in [("CPU","bi-cpu","primary"),("RAM","bi-memory","success"),("STORAGE","bi-hdd-network","storage")]:
             d = cap[k]
-            # Formatter selection
-            if k == "STORAGE": f = fmt_storage_tb; c_real = "info" # Purple-ish logic handled in card
-            elif k == "RAM": f = fmt_ram_gb; c_real = "success"
-            else: f = fmt_cpu; c_real = "primary"
-            
-            # Warn logic
-            if d["pct"] > 90: c_real = "danger"; alerts.append(dbc.Alert(f"High {k} Usage!", color="danger"))
-            elif d["pct"] > 80: c_real = "warning"
-
+            f = fmt_storage_tb if k == "STORAGE" else (fmt_ram_gb if k == "RAM" else fmt_cpu)
+            c_real = "danger" if d["pct"] > 90 else ("warning" if d["pct"] > 80 else ("info" if k=="STORAGE" else c))
+            if d["pct"] > 90: alerts.append(dbc.Alert(f"High {k} Usage!", color="danger"))
             cards.append(dbc.Col(kpi_card(k, f(d["used"]), f(d["total"]), f(d["reserved"]), f(d["available"]), d["pct"], c_real, i), md=4))
         
-        # Events Table with Delete ID
-        q = "SELECT id, event_time, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb FROM capacity_events WHERE event_time BETWEEN :s AND :e ORDER BY event_time DESC LIMIT 500"
-        ev_df = pd.read_sql(text(q), ENGINE, params={"s": d_start, "e": str(datetime.strptime(d_end, '%Y-%m-%d') + timedelta(days=1))})
-        if not ev_df.empty:
-            ev_df.columns = ["ID", "Date", "Server", "CPU", "RAM (GB)", "Stg (GB)"]
-            ev_tbl = dbc.Table.from_dataframe(ev_df, striped=True, hover=True, size="sm", className="table-modern")
-        else: ev_tbl = html.Div("No events in range", className="text-muted p-3")
+        ev_tbl = html.Div("No events in range", className="text-muted p-3")
+        try:
+            q = "SELECT id, event_time, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb FROM capacity_events WHERE event_time BETWEEN :s AND :e ORDER BY event_time DESC LIMIT 500"
+            ev_df = pd.read_sql(text(q), ENGINE, params={"s": d_start, "e": str(datetime.strptime(d_end, '%Y-%m-%d') + timedelta(days=1))})
+            if not ev_df.empty:
+                ev_df.columns = ["ID", "Date", "Server", "CPU", "RAM (GB)", "Stg (GB)"]
+                ev_tbl = dbc.Table.from_dataframe(ev_df, striped=True, hover=True, size="sm", className="table-modern")
+        except: pass
 
-        # Inventory Table
-        inv_q = "SELECT assetuniquename AS \"Server\", assetipaddress AS \"IP\", assetstatus AS \"Status\", servercores AS \"CPU\", ROUND(COALESCE(NULLIF(TRIM(servermemory),''),'0')::numeric/1024.0, 2) AS \"RAM (GB)\", totaldisk AS \"Storage (GB)\" FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at"
-        inv_df = pd.read_sql(text(inv_q), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
-        
-        if trig == "btn-export" and not inv_df.empty:
-            dl_data = dcc.send_data_frame(inv_df.to_csv, "inventory_export.csv")
-
-        if not inv_df.empty:
-            # Custom IP Column Styling + Status Dot
-            inv_df["Status"] = inv_df["Status"].apply(lambda s: html.Span([html.Span(className=f"status-dot bg-{'success' if 'Running' in s else 'secondary'}"), s]))
-            # Dash Table from DF doesn't support HTML in cells easily without complex iteration, so we build manually for layout control
-            header = [html.Th(c) for c in inv_df.columns]
-            rows = []
-            for _, r in inv_df.iterrows():
-                rows.append(html.Tr([
-                    html.Td(r["Server"]),
-                    html.Td(r["IP"], className="col-ip"), # Fixed width class
-                    html.Td(r["Status"]),
-                    html.Td(r["CPU"]),
-                    html.Td(r["RAM (GB)"]),
-                    html.Td(r["Storage (GB)"])
-                ]))
-            inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
-        else: inv_tbl = html.P("No Inventory Data")
+        inv_tbl = html.P("No Inventory Data")
+        try:
+            inv_q = "SELECT assetuniquename AS \"Server\", assetipaddress AS \"IP\", assetstatus AS \"Status\", servercores AS \"CPU\", ROUND(COALESCE(NULLIF(TRIM(servermemory),''),'0')::numeric/1024.0, 2) AS \"RAM (GB)\", totaldisk AS \"Storage (GB)\" FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at"
+            inv_df = pd.read_sql(text(inv_q), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
+            if trig == "btn-export" and not inv_df.empty: dl_data = dcc.send_data_frame(inv_df.to_csv, "inventory_export.csv")
+            if not inv_df.empty:
+                inv_df["Status"] = inv_df["Status"].apply(lambda s: html.Span([html.Span(className=f"status-dot bg-{'success' if 'Running' in s else 'secondary'}"), s]))
+                header = [html.Th(c) for c in inv_df.columns]
+                rows = [html.Tr([html.Td(r["Server"]), html.Td(r["IP"], className="col-ip"), html.Td(r["Status"]), html.Td(r["CPU"]), html.Td(r["RAM (GB)"]), html.Td(r["Storage (GB)"])]) for _, r in inv_df.iterrows()]
+                inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
+        except: pass
 
         return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
