@@ -3,7 +3,6 @@ import io
 import base64
 import threading
 import time
-import random
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -121,7 +120,7 @@ def calculate_capacity():
     }
 
 def build_trend(resource):
-    # FIXED: Robust Date Merging to ensure graph lines always appear
+    # LOGIC RESTORED: Baseline + Events(Reconciled=False)
     today = datetime.today().date(); start = today - timedelta(days=30)
     
     # 1. Baseline
@@ -133,36 +132,30 @@ def build_trend(resource):
         base = float(inv["v"].iloc[0])
     except: base = 0.0
 
-    # 2. Fetch Events
+    # 2. Fetch Events (Only Pending/Unreconciled as requested)
     try:
         df = pd.read_sql(text("""
             SELECT DATE(event_time) AS d, SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) ELSE COALESCE(storage_delta_gb,0) END) AS v
-            FROM capacity_events WHERE event_time >= :st GROUP BY d ORDER BY d
+            FROM capacity_events WHERE event_time >= :st AND reconciled = false GROUP BY d ORDER BY d
         """), ENGINE, params={"r": resource, "st": start})
     except: df = pd.DataFrame(columns=["d", "v"])
 
-    # 3. Robust Merge Logic
-    # Create the perfect date range dataframe
+    # 3. Robust Merge Logic (To keep the line visible even with date gaps)
     full_range = pd.DataFrame({"d": pd.date_range(start, today)})
-    full_range["d"] = full_range["d"].dt.date # Ensure just Date object
+    full_range["d"] = full_range["d"].dt.date
 
     if not df.empty:
-        # Ensure DB data is also Date object (not string/datetime)
         df["d"] = pd.to_datetime(df["d"]).dt.date
-        # Merge: Left join ensures all 30 days exist, fill missing with 0
         merged = pd.merge(full_range, df, on="d", how="left").fillna(0)
     else:
         full_range["v"] = 0.0
         merged = full_range
 
-    # 4. Handle RAM Unit issues
     if resource == "RAM":
         if merged["v"].abs().max() > (abs(base)*10 if base>0 else 5000): merged["v"] /= 1024.0
 
-    # 5. Calculate CumSum
     merged["used"] = base + merged["v"].cumsum()
 
-    # 6. Formatting
     col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
     y_val = merged["used"]/1024.0 if resource == "STORAGE" else merged["used"]
     y_base = base/1024.0 if resource == "STORAGE" else base
@@ -170,7 +163,7 @@ def build_trend(resource):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=merged["d"], y=y_val, mode="lines", line=dict(color=col, width=3, shape='spline'), fill="tozeroy", fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", hovertemplate='%{y:.2f}<extra></extra>'))
     fig.add_trace(go.Scatter(x=[merged["d"].iloc[0], merged["d"].iloc[-1]], y=[y_base, y_base], mode="lines", line=dict(color="gray", dash="dot"), hoverinfo="skip"))
-    fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Total ({'TB' if resource=='STORAGE' else ('GB' if resource=='RAM' else 'Cores')})"), showlegend=False)
+    fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Trend ({'TB' if resource=='STORAGE' else ('GB' if resource=='RAM' else 'Cores')})"), showlegend=False)
     return fig
 
 # --- RECONCILER ---
@@ -225,23 +218,6 @@ def delete_event(event_id):
         return True if res.rowcount > 0 else False
     except: return False
 
-def generate_demo_data():
-    try:
-        # Generate 30 days of random events
-        today = datetime.now()
-        servers = ["web-01", "db-01", "app-02", "cache-01", "auth-01"]
-        with ENGINE.begin() as conn:
-            for i in range(30):
-                dt = today - timedelta(days=i)
-                srv = random.choice(servers)
-                cpu = random.randint(-4, 8)
-                ram = random.randint(-8, 32)
-                stg = random.randint(0, 100)
-                conn.execute(text("INSERT INTO capacity_events (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time, pending_inventory, reconciled) VALUES (:s, :c, :r, :st, 'DEMO', :et, true, false)"),
-                             {"s":srv, "c":cpu, "r":ram, "st":stg, "et":dt})
-        return True
-    except: return False
-
 # --- LAYOUT ---
 app = Dash(__name__, external_stylesheets=[dbc.themes.ZEPHYR, "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css"], suppress_callback_exceptions=True)
 app.title = "Capacity Manager Pro"
@@ -269,7 +245,6 @@ app.index_string = '''
         
         .badge-manual { background-color: #e7f1ff; color: #0d6efd; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
         .badge-csv { background-color: #e6fcf5; color: #0ca678; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
-        .badge-demo { background-color: #fff3bf; color: #f08c00; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
         .badge-pending { color: #fcc419; }
         .badge-reconciled { color: #20c997; }
     </style>
@@ -314,9 +289,9 @@ view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CPU Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("RAM Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("Storage Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("CPU Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("RAM Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("Storage Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
     ], className="g-4 mb-4")
 ])
 
@@ -380,9 +355,6 @@ view_set = html.Div(id="view-set", style={"display": "none"}, children=[
                 dbc.Row([dbc.Col("User:", width=4, className="fw-bold"), dbc.Col(f"{DB_CONFIG['user'][0]}***")]),
                 html.Hr(),
                 dbc.Button("Test Reconcile Now", id="btn-force-rec", color="warning", size="sm"),
-                html.Hr(),
-                dbc.Button("Generate Demo Data (30 Days)", id="btn-demo", color="info", size="sm"),
-                html.Div(id="demo-msg", className="mt-2 small fw-bold text-success")
             ])
         ], className="custom-card"), md=6),
         dbc.Col(dbc.Card([
@@ -422,17 +394,17 @@ def nav(b1, b2, b3, b4):
 @app.callback(
     [Output("kpi-row", "children"), Output("alert-box", "children"), Output("cpu-trend", "figure"), Output("ram-trend", "figure"), Output("storage-trend", "figure"),
      Output("event-table", "children"), Output("event-stats", "children"), Output("inv-table", "children"), 
-     Output("man-msg", "children"), Output("csv-msg", "children"), Output("del-msg", "children"), Output("set-msg", "children"), Output("demo-msg", "children"),
+     Output("man-msg", "children"), Output("csv-msg", "children"), Output("del-msg", "children"), Output("set-msg", "children"),
      Output("download-csv", "data"), Output("last-sync", "children")],
     [Input("timer", "n_intervals"), Input("refresh", "n_clicks"), Input("submit", "n_clicks"), Input("csv-up", "contents"), 
      Input("btn-del", "n_clicks"), Input("date-filter", "start_date"), Input("date-filter", "end_date"),
-     Input("btn-export", "n_clicks"), Input("btn-force-rec", "n_clicks"), Input("btn-update-th", "n_clicks"), Input("btn-demo", "n_clicks")],
+     Input("btn-export", "n_clicks"), Input("btn-force-rec", "n_clicks"), Input("btn-update-th", "n_clicks")],
     [State("server", "value"), State("cpu", "value"), State("ram", "value"), State("stg", "value"), State("csv-up", "filename"), State("del-id", "value"),
      State("t-cpu", "value"), State("t-ram", "value"), State("t-pct", "value")]
 )
-def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th, n_demo, srv, cpu, ram, stg, fname, del_id, t_cpu, t_ram, t_pct):
+def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th, srv, cpu, ram, stg, fname, del_id, t_cpu, t_ram, t_pct):
     ctx = callback_context; trig = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
-    m_msg = c_msg = d_msg = s_msg = dem_msg = dl_data = no_update
+    m_msg = c_msg = d_msg = s_msg = dl_data = no_update
     force = False
 
     if trig == "submit" and n_sub:
@@ -464,10 +436,6 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
 
     if trig == "btn-update-th":
         GLOBAL_THRESHOLDS.update({"cpu_abs":t_cpu, "ram_mb_abs":t_ram, "pct_tolerance":t_pct}); s_msg = "Thresholds Updated"
-    
-    if trig == "btn-demo":
-        if generate_demo_data(): dem_msg = "Demo Data Added!"; force = True
-        else: dem_msg = "Error generating data"
 
     if force or trig in ("timer", "refresh", "date-filter", "btn-export", ""):
         cap = calculate_capacity()
@@ -508,9 +476,9 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dem_msg, dl_data, datetime.now().strftime("%H:%M:%S")
+        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, no_update, dl_data, datetime.now().strftime("%H:%M:%S")
 
-    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, dem_msg, no_update, no_update
+    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update, no_update
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
