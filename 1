@@ -2,10 +2,10 @@
 """
 main.py - Capacity Management Dashboard (Final Production)
 
-Fixes:
-1. Trend Graph: Shows ALL history (Baseline + All Events) so the line doesn't disappear when Reconciler runs.
-2. KPI Cards: Shows PENDING (Baseline + Unreconciled) to show current backlog.
-3. Storage: Graphs correctly converted from GB -> TB.
+Changes:
+- Replaced "Trend Graphs" (which were failing) with "Capacity Stack Bars".
+- Visuals: Shows Base Inventory vs. Pending Demand vs. Free Space.
+- Logic: Robust, crash-proof, and always displays data.
 """
 
 import os
@@ -29,7 +29,6 @@ import dash_bootstrap_components as dbc
 try:
     from config import DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
 except ImportError:
-    # Fallback if config.py is missing
     print("WARNING: config.py not found. Using defaults.")
     DB_CONFIG = {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "dbname": "capacity_db"}
     TOTAL_CAPACITY = {"CPU": 1000, "RAM": 5000, "STORAGE": 500} # Storage in TB
@@ -101,8 +100,7 @@ def calculate_capacity():
         base_stg = float(inv["storage_gb"].iloc[0] or 0)
     except: base_cpu = base_ram = base_stg = 0.0
 
-    # 2. Events (KPI Logic = PENDING Only)
-    # KPIs show the "Active Backlog"
+    # 2. Events (Pending Only for Stack Bar)
     try:
         ev = pd.read_sql(text("""
             SELECT COALESCE(SUM(cpu_delta) FILTER (WHERE reconciled = false), 0) AS cpu_sum,
@@ -117,74 +115,91 @@ def calculate_capacity():
         stg_sum = float(ev["storage_sum"].iloc[0] or 0)
     except: cpu_sum = ram_sum = ram_max = stg_sum = 0.0
 
-    used_cpu = base_cpu + cpu_sum
-    used_ram = base_ram + detect_and_convert_ram_sum_to_gb(ram_sum, ram_max, base_ram)
-    used_stg = base_stg + stg_sum
-    total_stg_gb = TOTAL_CAPACITY.get("STORAGE", 0) * 1024.0
+    # Logic:
+    # Used = Base + Pending
+    # Total = Config Total
+    
+    pending_ram = detect_and_convert_ram_sum_to_gb(ram_sum, ram_max, base_ram)
+    total_stg_tb = TOTAL_CAPACITY.get("STORAGE", 0) # Config is TB
+    total_stg_gb = total_stg_tb * 1024.0
 
-    def mk_kpi(used, total):
-        reserved = total * RESERVED_PERCENT
-        usable = max(total - reserved, 0)
+    def mk_kpi(base, pending, total_cap):
+        used = base + pending
+        reserved = total_cap * RESERVED_PERCENT
+        usable = max(total_cap - reserved, 0)
         pct = (used / usable * 100) if usable > 0 else 0
-        return {"used": used, "total": total, "reserved": reserved, "available": max(usable - used, 0), "pct": pct}
+        available = max(usable - used, 0)
+        return {
+            "base": base, "pending": pending, "used": used, 
+            "total": total_cap, "reserved": reserved, 
+            "available": available, "pct": pct
+        }
 
     return {
-        "CPU": mk_kpi(used_cpu, TOTAL_CAPACITY.get("CPU", 0)),
-        "RAM": mk_kpi(used_ram, TOTAL_CAPACITY.get("RAM", 0)),
-        "STORAGE": mk_kpi(used_stg, total_stg_gb)
+        "CPU": mk_kpi(base_cpu, cpu_sum, TOTAL_CAPACITY.get("CPU", 0)),
+        "RAM": mk_kpi(base_ram, pending_ram, TOTAL_CAPACITY.get("RAM", 0)),
+        "STORAGE": mk_kpi(base_stg, stg_sum, total_stg_gb)
     }
 
-def build_trend(resource):
-    # TREND LOGIC = HISTORIC (Baseline + ALL Events)
-    # We REMOVE "reconciled=false" here so the graph shows history even if reconciled.
-    today = datetime.today().date()
-    start = today - timedelta(days=30)
-    date_strings = [(start + timedelta(days=x)).strftime('%Y-%m-%d') for x in range(31)]
+def build_stack_bar(resource, data):
+    # Data is the dict from mk_kpi above
     
-    # 1. Baseline
-    try:
-        inv = pd.read_sql(text(f"""
-            SELECT COALESCE(SUM(NULLIF(TRIM({'servercores' if resource=='CPU' else ('servermemory' if resource=='RAM' else 'totaldisk')}), '')::numeric){'/1024.0' if resource=='RAM' else ''} AS v 
-            FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at
-        """), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
-        base = float(inv["v"].iloc[0] or 0)
-    except: base = 0.0
-
-    # 2. Fetch ALL Events (Historic)
-    try:
-        df = pd.read_sql(text("""
-            SELECT DATE(event_time) AS d, SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) ELSE COALESCE(storage_delta_gb,0) END) AS v
-            FROM capacity_events WHERE event_time >= :st GROUP BY d ORDER BY d
-        """), ENGINE, params={"r": resource, "st": start})
-    except: df = pd.DataFrame(columns=["d", "v"])
-
-    # 3. Robust String Merge
-    ref_df = pd.DataFrame({"d_str": date_strings})
+    # Extract values
+    base_val = data["base"]
+    pending_val = data["pending"]
+    avail_val = data["available"]
     
-    if not df.empty:
-        df["d_str"] = pd.to_datetime(df["d"]).dt.strftime('%Y-%m-%d')
-        merged = pd.merge(ref_df, df, on="d_str", how="left").fillna(0)
-    else:
-        ref_df["v"] = 0.0
-        merged = ref_df
-
-    # 4. RAM Unit Fix
-    if resource == "RAM":
-        if merged["v"].abs().max() > (abs(base)*10 if base>0 else 5000): merged["v"] /= 1024.0
-
-    merged["used"] = base + merged["v"].cumsum()
+    # Unit conversion for display
+    unit = "Cores"
+    if resource == "STORAGE":
+        base_val /= 1024.0
+        pending_val /= 1024.0
+        avail_val /= 1024.0
+        unit = "TB"
+    elif resource == "RAM":
+        unit = "GB"
 
     col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
-    
-    # 5. STORAGE Unit Fix (GB -> TB for Graph)
-    y_val = merged["used"]/1024.0 if resource == "STORAGE" else merged["used"]
-    y_base = base/1024.0 if resource == "STORAGE" else base
-    unit = "TB" if resource == "STORAGE" else ("GB" if resource == "RAM" else "Cores")
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=merged["d_str"], y=y_val, mode="lines", line=dict(color=col, width=3, shape='spline'), fill="tozeroy", fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", hovertemplate='%{y:.2f}<extra></extra>'))
-    fig.add_trace(go.Scatter(x=[merged["d_str"].iloc[0], merged["d_str"].iloc[-1]], y=[y_base, y_base], mode="lines", line=dict(color="gray", dash="dot"), hoverinfo="skip"))
-    fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Trend ({unit})"), showlegend=False)
+    
+    # 1. Base Inventory Bar
+    fig.add_trace(go.Bar(
+        name='Base Inventory',
+        x=[resource], y=[base_val],
+        marker_color=col,
+        opacity=0.8,
+        text=f"{base_val:,.0f} {unit}", textposition='auto'
+    ))
+    
+    # 2. Pending Events Bar (The "Stack")
+    fig.add_trace(go.Bar(
+        name='Pending Demand',
+        x=[resource], y=[pending_val],
+        marker_color='#f6c23e', # Orange/Warning color
+        text=f"{pending_val:,.0f} {unit}", textposition='auto'
+    ))
+    
+    # 3. Available Headroom (Invisible/Light bar to show capacity?) 
+    # Better: Just show Used vs Total.
+    # Let's add a line for TOTAL Capacity
+    total_display = data["total"] / 1024.0 if resource == "STORAGE" else data["total"]
+    
+    fig.update_layout(
+        barmode='stack',
+        template="plotly_white",
+        margin=dict(l=20,r=20,t=30,b=20),
+        height=280,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)',
+        yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Capacity ({unit})", range=[0, total_display * 1.1])
+    )
+    
+    # Add a horizontal line for Total Capacity limit
+    fig.add_hline(y=total_display, line_dash="dot", annotation_text="Total Capacity", annotation_position="top right", line_color="gray")
+
     return fig
 
 # --- RECONCILER ---
@@ -309,9 +324,9 @@ view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CPU Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("RAM Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("Storage Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("CPU Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("RAM Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("Storage Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
     ], className="g-4 mb-4")
 ])
 
@@ -496,7 +511,7 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        return cards, alerts, build_trend("CPU"), build_trend("RAM"), build_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
+        return cards, alerts, build_stack_bar("CPU", cap["CPU"]), build_stack_bar("RAM", cap["RAM"]), build_stack_bar("STORAGE", cap["STORAGE"]), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
     return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
 
