@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-main.py - Capacity Management Dashboard (Final Production Fix)
+main.py - Capacity Management Dashboard (Final Production)
 
 Fixes:
-- Trend Graphs now use String-based date matching (Fixes "No Data" issue).
-- Logic: Trend = Baseline + Unreconciled Events (As requested).
-- Storage: Correctly converts GB to TB for visualization.
+1. Trend Graph: Shows ALL history (Baseline + All Events) so the line doesn't disappear when Reconciler runs.
+2. KPI Cards: Shows PENDING (Baseline + Unreconciled) to show current backlog.
+3. Storage: Graphs correctly converted from GB -> TB.
 """
 
 import os
@@ -29,6 +29,7 @@ import dash_bootstrap_components as dbc
 try:
     from config import DB_CONFIG, TOTAL_CAPACITY, RESERVED_PERCENT
 except ImportError:
+    # Fallback if config.py is missing
     print("WARNING: config.py not found. Using defaults.")
     DB_CONFIG = {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "dbname": "capacity_db"}
     TOTAL_CAPACITY = {"CPU": 1000, "RAM": 5000, "STORAGE": 500} # Storage in TB
@@ -85,8 +86,9 @@ def detect_and_convert_ram_sum_to_gb(raw_sum, raw_max, baseline_gb):
     if abs(rm) > abs(baseline_gb) * 10 or abs(rm) > 5000: return rs / 1024.0
     return rs
 
-# --- LOGIC ---
+# --- CORE LOGIC ---
 def calculate_capacity():
+    # 1. Baseline
     try:
         inv = pd.read_sql(text("""
             SELECT COALESCE(SUM(NULLIF(TRIM(servercores), '')::numeric),0) AS cpu,
@@ -99,6 +101,8 @@ def calculate_capacity():
         base_stg = float(inv["storage_gb"].iloc[0] or 0)
     except: base_cpu = base_ram = base_stg = 0.0
 
+    # 2. Events (KPI Logic = PENDING Only)
+    # KPIs show the "Active Backlog"
     try:
         ev = pd.read_sql(text("""
             SELECT COALESCE(SUM(cpu_delta) FILTER (WHERE reconciled = false), 0) AS cpu_sum,
@@ -131,7 +135,8 @@ def calculate_capacity():
     }
 
 def build_trend(resource):
-    # --- DATE LOGIC ---
+    # TREND LOGIC = HISTORIC (Baseline + ALL Events)
+    # We REMOVE "reconciled=false" here so the graph shows history even if reconciled.
     today = datetime.today().date()
     start = today - timedelta(days=30)
     date_strings = [(start + timedelta(days=x)).strftime('%Y-%m-%d') for x in range(31)]
@@ -145,41 +150,41 @@ def build_trend(resource):
         base = float(inv["v"].iloc[0] or 0)
     except: base = 0.0
 
-    # 2. Fetch Events (Baseline + Unreconciled Logic)
+    # 2. Fetch ALL Events (Historic)
     try:
         df = pd.read_sql(text("""
             SELECT DATE(event_time) AS d, SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) ELSE COALESCE(storage_delta_gb,0) END) AS v
-            FROM capacity_events WHERE event_time >= :st AND reconciled = false GROUP BY d ORDER BY d
+            FROM capacity_events WHERE event_time >= :st GROUP BY d ORDER BY d
         """), ENGINE, params={"r": resource, "st": start})
     except: df = pd.DataFrame(columns=["d", "v"])
 
-    # 3. Robust Merge using Strings
+    # 3. Robust String Merge
     ref_df = pd.DataFrame({"d_str": date_strings})
     
     if not df.empty:
-        # Convert DB dates to string YYYY-MM-DD
         df["d_str"] = pd.to_datetime(df["d"]).dt.strftime('%Y-%m-%d')
-        # Merge on string representation
         merged = pd.merge(ref_df, df, on="d_str", how="left").fillna(0)
     else:
         ref_df["v"] = 0.0
         merged = ref_df
 
-    # 4. RAM Unit Handling
+    # 4. RAM Unit Fix
     if resource == "RAM":
         if merged["v"].abs().max() > (abs(base)*10 if base>0 else 5000): merged["v"] /= 1024.0
 
     merged["used"] = base + merged["v"].cumsum()
 
     col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
-    # Storage is stored as GB, display as TB
+    
+    # 5. STORAGE Unit Fix (GB -> TB for Graph)
     y_val = merged["used"]/1024.0 if resource == "STORAGE" else merged["used"]
     y_base = base/1024.0 if resource == "STORAGE" else base
+    unit = "TB" if resource == "STORAGE" else ("GB" if resource == "RAM" else "Cores")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=merged["d_str"], y=y_val, mode="lines", line=dict(color=col, width=3, shape='spline'), fill="tozeroy", fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", hovertemplate='%{y:.2f}<extra></extra>'))
     fig.add_trace(go.Scatter(x=[merged["d_str"].iloc[0], merged["d_str"].iloc[-1]], y=[y_base, y_base], mode="lines", line=dict(color="gray", dash="dot"), hoverinfo="skip"))
-    fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Trend ({'TB' if resource=='STORAGE' else ('GB' if resource=='RAM' else 'Cores')})"), showlegend=False)
+    fig.update_layout(template="plotly_white", margin=dict(l=40,r=10,t=10,b=30), height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Trend ({unit})"), showlegend=False)
     return fig
 
 # --- RECONCILER ---
@@ -304,9 +309,9 @@ view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CPU Backlog Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("RAM Backlog Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("Storage Backlog Trend (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("CPU Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("RAM Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("Storage Total Demand (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
     ], className="g-4 mb-4")
 ])
 
@@ -369,7 +374,7 @@ view_set = html.Div(id="view-set", style={"display": "none"}, children=[
                 dbc.Row([dbc.Col("DB:", width=4, className="fw-bold"), dbc.Col(DB_CONFIG['dbname'])]),
                 dbc.Row([dbc.Col("User:", width=4, className="fw-bold"), dbc.Col(f"{DB_CONFIG['user'][0]}***")]),
                 html.Hr(),
-                dbc.Button("Test Reconcile Now", id="btn-force-rec", color="warning", size="sm")
+                dbc.Button("Test Reconcile Now", id="btn-force-rec", color="warning", size="sm"),
             ])
         ], className="custom-card"), md=6),
         dbc.Col(dbc.Card([
