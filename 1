@@ -47,6 +47,27 @@ RUN_RECONCILER = os.environ.get("RUN_RECONCILER", "true").lower() in ("true", "1
 GLOBAL_THRESHOLDS = {"cpu_abs":1, "ram_mb_abs":512, "storage_gb_abs":5, "pct_tolerance":0.20}
 COLORS = {"background": "#f4f6f9", "cpu": "#4e73df", "ram": "#1cc88a", "storage": "#6f42c1"}
 
+# --- AUTO-FIX DATABASE SCHEMA ---
+def fix_schema():
+    """Checks for missing columns and adds them if necessary."""
+    try:
+        with ENGINE.begin() as conn:
+            # 1. Add pending_inventory if missing
+            conn.execute(text("ALTER TABLE capacity_events ADD COLUMN IF NOT EXISTS pending_inventory BOOLEAN DEFAULT TRUE"))
+            # 2. Add reconciled if missing
+            conn.execute(text("ALTER TABLE capacity_events ADD COLUMN IF NOT EXISTS reconciled BOOLEAN DEFAULT FALSE"))
+            # 3. Add reconciled_at if missing
+            conn.execute(text("ALTER TABLE capacity_events ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMP"))
+            # 4. Add reconciled_by if missing
+            conn.execute(text("ALTER TABLE capacity_events ADD COLUMN IF NOT EXISTS reconciled_by VARCHAR(50)"))
+        logger.info("Schema check passed (columns patched if missing).")
+    except Exception as e:
+        logger.error(f"Schema patch failed: {e}")
+        print(f"CRITICAL DB ERROR: {e}")
+
+# Run fix immediately on startup
+fix_schema()
+
 # --- HELPERS ---
 def now_utc(): return datetime.now(timezone.utc)
 def fmt_cpu(v): return f"{int(round(float(v or 0))):,} Cores"
@@ -165,6 +186,7 @@ def auto_reconcile_pending_events():
     matched = 0
     try:
         if not _reconcile_lock.acquire(blocking=False): return
+        # Ensure column exists before query (handled by fix_schema on start)
         df = pd.read_sql(text("SELECT id, assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb FROM capacity_events WHERE pending_inventory = true AND reconciled = false"), ENGINE)
         for _, row in df.iterrows():
             inv = pd.read_sql(text("SELECT servercores, servermemory, totaldisk FROM inventory WHERE assetuniquename = :s LIMIT 1"), ENGINE, params={"s": row["assetuniquename"]})
@@ -420,7 +442,7 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
         if not srv: m_msg = dbc.Alert("Server required", color="danger")
         else:
             try:
-                # FIXED: Use with engine.connect() for SQLAlchemy 2.0+
+                # Use context manager for connection (SQLAlchemy 2.0 safe)
                 with ENGINE.connect() as conn:
                     ex = conn.execute(text("SELECT 1 FROM inventory WHERE assetuniquename=:s"), {"s":srv}).fetchone()
                 ok, txt = insert_event(srv, float(cpu or 0), float(ram or 0)*1024, float(stg or 0), "MANUAL", pending=(ex is None))
@@ -489,18 +511,19 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        # Build Visuals
+        # Build Gauges
         c_fig = build_gauge("CPU Used", cap["CPU"]["used"], cap["CPU"]["total"], COLORS["cpu"])
         r_fig = build_gauge("RAM Used", cap["RAM"]["used"], cap["RAM"]["total"], COLORS["ram"])
         s_fig = build_gauge("Storage Used (TB)", cap["STORAGE"]["used"]/1024.0, cap["STORAGE"]["total"]/1024.0, COLORS["storage"])
 
+        # Build Tops
         tc_cpu = build_top_consumers("CPU")
         tc_ram = build_top_consumers("RAM")
         tc_stg = build_top_consumers("STORAGE")
 
         return cards, alerts, c_fig, r_fig, s_fig, tc_cpu, tc_ram, tc_stg, ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
-    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
+    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
