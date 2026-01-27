@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-main.py - Capacity Management Dashboard (Final Production)
-
-Changes:
-- Replaced "Trend Graphs" (which were failing) with "Capacity Stack Bars".
-- Visuals: Shows Base Inventory vs. Pending Demand vs. Free Space.
-- Logic: Robust, crash-proof, and always displays data.
-"""
-
 import os
 import io
 import base64
@@ -100,7 +90,7 @@ def calculate_capacity():
         base_stg = float(inv["storage_gb"].iloc[0] or 0)
     except: base_cpu = base_ram = base_stg = 0.0
 
-    # 2. Events (Pending Only for Stack Bar)
+    # 2. Events (Pending Only for KPI)
     try:
         ev = pd.read_sql(text("""
             SELECT COALESCE(SUM(cpu_delta) FILTER (WHERE reconciled = false), 0) AS cpu_sum,
@@ -115,91 +105,125 @@ def calculate_capacity():
         stg_sum = float(ev["storage_sum"].iloc[0] or 0)
     except: cpu_sum = ram_sum = ram_max = stg_sum = 0.0
 
-    # Logic:
-    # Used = Base + Pending
-    # Total = Config Total
-    
-    pending_ram = detect_and_convert_ram_sum_to_gb(ram_sum, ram_max, base_ram)
-    total_stg_tb = TOTAL_CAPACITY.get("STORAGE", 0) # Config is TB
-    total_stg_gb = total_stg_tb * 1024.0
+    used_cpu = base_cpu + cpu_sum
+    used_ram = base_ram + detect_and_convert_ram_sum_to_gb(ram_sum, ram_max, base_ram)
+    used_stg = base_stg + stg_sum
+    total_stg_gb = TOTAL_CAPACITY.get("STORAGE", 0) * 1024.0
 
-    def mk_kpi(base, pending, total_cap):
-        used = base + pending
-        reserved = total_cap * RESERVED_PERCENT
-        usable = max(total_cap - reserved, 0)
+    def mk_kpi(used, total):
+        reserved = total * RESERVED_PERCENT
+        usable = max(total - reserved, 0)
         pct = (used / usable * 100) if usable > 0 else 0
-        available = max(usable - used, 0)
-        return {
-            "base": base, "pending": pending, "used": used, 
-            "total": total_cap, "reserved": reserved, 
-            "available": available, "pct": pct
-        }
+        return {"used": used, "total": total, "reserved": reserved, "available": max(usable - used, 0), "pct": pct}
 
     return {
-        "CPU": mk_kpi(base_cpu, cpu_sum, TOTAL_CAPACITY.get("CPU", 0)),
-        "RAM": mk_kpi(base_ram, pending_ram, TOTAL_CAPACITY.get("RAM", 0)),
-        "STORAGE": mk_kpi(base_stg, stg_sum, total_stg_gb)
+        "CPU": mk_kpi(used_cpu, TOTAL_CAPACITY.get("CPU", 0)),
+        "RAM": mk_kpi(used_ram, TOTAL_CAPACITY.get("RAM", 0)),
+        "STORAGE": mk_kpi(used_stg, total_stg_gb)
     }
 
-def build_stack_bar(resource, data):
-    # Data is the dict from mk_kpi above
+def build_smart_trend(resource):
+    """
+    Builds a trend graph that accumulates value over time.
+    Logic:
+    1. Start with Baseline Inventory.
+    2. Get ALL historic events (positive and negative).
+    3. Sum them cumulatively day by day.
+    4. Forward-fill any gaps so the line is continuous.
+    """
+    today = datetime.today().date()
+    start = today - timedelta(days=30)
     
-    # Extract values
-    base_val = data["base"]
-    pending_val = data["pending"]
-    avail_val = data["available"]
+    # 1. Get Baseline
+    try:
+        inv = pd.read_sql(text(f"""
+            SELECT COALESCE(SUM(NULLIF(TRIM({'servercores' if resource=='CPU' else ('servermemory' if resource=='RAM' else 'totaldisk')}), '')::numeric){'/1024.0' if resource=='RAM' else ''} AS v 
+            FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at
+        """), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
+        base = float(inv["v"].iloc[0] or 0)
+    except: base = 0.0
+
+    # 2. Get Deltas grouped by Day
+    try:
+        # Note: We group by DATE(event_time) to get daily sums
+        df = pd.read_sql(text("""
+            SELECT DATE(event_time) as d_date, 
+                   SUM(CASE WHEN :r='CPU' THEN COALESCE(cpu_delta,0) 
+                            WHEN :r='RAM' THEN COALESCE(ram_delta_gb,0) 
+                            ELSE COALESCE(storage_delta_gb,0) END) as daily_delta
+            FROM capacity_events 
+            WHERE event_time >= :st 
+            GROUP BY DATE(event_time)
+        """), ENGINE, params={"r": resource, "st": start})
+    except: 
+        df = pd.DataFrame(columns=["d_date", "daily_delta"])
+
+    # 3. Create Continuous Timeline
+    # Create a full date index from start to today
+    idx = pd.date_range(start, today)
     
-    # Unit conversion for display
+    # Convert DB data to proper datetime index
+    if not df.empty:
+        df["d_date"] = pd.to_datetime(df["d_date"])
+        df = df.set_index("d_date")
+        # Handle RAM scaling if needed
+        if resource == "RAM" and df["daily_delta"].abs().max() > (abs(base)*10 if base>0 else 5000):
+            df["daily_delta"] /= 1024.0
+    else:
+        df = pd.DataFrame(index=idx)
+        df["daily_delta"] = 0.0
+
+    # 4. Reindex to fill gaps with 0 (days with no events)
+    df = df.reindex(idx, fill_value=0)
+    
+    # 5. Calculate Cumulative Sum (The Trend)
+    # The 'base' is where we are TODAY based on snapshot. 
+    # To show history, we work backwards or just add CumSum to a starting point.
+    # Simpler approach: Assume 'base' is the starting point 30 days ago (approximation) 
+    # OR assume 'base' is current and subtract events?
+    # Best approach for dashboard: Start with Base and add Cumulative Sum of new events.
+    
+    df["total"] = base + df["daily_delta"].cumsum()
+    
+    # Reset index for plotting
+    df = df.reset_index().rename(columns={"index": "date"})
+
+    # 6. Formatting
+    col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
+    
+    # Unit conversion
+    y_vals = df["total"]
     unit = "Cores"
     if resource == "STORAGE":
-        base_val /= 1024.0
-        pending_val /= 1024.0
-        avail_val /= 1024.0
+        y_vals = y_vals / 1024.0
         unit = "TB"
     elif resource == "RAM":
         unit = "GB"
 
-    col = COLORS["storage"] if resource == "STORAGE" else (COLORS["ram"] if resource == "RAM" else COLORS["cpu"])
-
     fig = go.Figure()
     
-    # 1. Base Inventory Bar
-    fig.add_trace(go.Bar(
-        name='Base Inventory',
-        x=[resource], y=[base_val],
-        marker_color=col,
-        opacity=0.8,
-        text=f"{base_val:,.0f} {unit}", textposition='auto'
+    # Area Chart with Gradient
+    fig.add_trace(go.Scatter(
+        x=df["date"], 
+        y=y_vals, 
+        mode="lines", 
+        line=dict(color=col, width=3, shape='spline'), # Spline makes it smooth
+        fill="tozeroy", 
+        fillcolor=f"rgba{tuple(int(col.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}", # Transparent fill
+        name="Total Used"
     ))
-    
-    # 2. Pending Events Bar (The "Stack")
-    fig.add_trace(go.Bar(
-        name='Pending Demand',
-        x=[resource], y=[pending_val],
-        marker_color='#f6c23e', # Orange/Warning color
-        text=f"{pending_val:,.0f} {unit}", textposition='auto'
-    ))
-    
-    # 3. Available Headroom (Invisible/Light bar to show capacity?) 
-    # Better: Just show Used vs Total.
-    # Let's add a line for TOTAL Capacity
-    total_display = data["total"] / 1024.0 if resource == "STORAGE" else data["total"]
     
     fig.update_layout(
-        barmode='stack',
-        template="plotly_white",
-        margin=dict(l=20,r=20,t=30,b=20),
-        height=280,
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="plotly_white", 
+        margin=dict(l=40,r=10,t=10,b=30), 
+        height=280, 
         paper_bgcolor='rgba(0,0,0,0)', 
-        plot_bgcolor='rgba(0,0,0,0)',
-        yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Capacity ({unit})", range=[0, total_display * 1.1])
+        plot_bgcolor='rgba(0,0,0,0)', 
+        xaxis=dict(showgrid=False, showline=True, linecolor="#eee"), 
+        yaxis=dict(showgrid=True, gridcolor="#eee", title=f"Capacity ({unit})"), 
+        showlegend=False,
+        hovermode="x unified"
     )
-    
-    # Add a horizontal line for Total Capacity limit
-    fig.add_hline(y=total_display, line_dash="dot", annotation_text="Total Capacity", annotation_position="top right", line_color="gray")
-
     return fig
 
 # --- RECONCILER ---
@@ -324,9 +348,9 @@ view_dash = html.Div(id="view-dash", children=[
     dcc.Loading(dbc.Row(id="kpi-row", className="g-4 mb-4")),
     html.Div(id="alert-box"),
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CPU Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("RAM Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
-        dbc.Col(dbc.Card([dbc.CardHeader("Storage Breakdown", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("CPU Total Growth (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="cpu-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("RAM Total Growth (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="ram-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("Storage Total Growth (30d)", className="bg-white fw-bold border-0"), dbc.CardBody(dcc.Graph(id="storage-trend", config={'displayModeBar':False}))], className="custom-card"), lg=4),
     ], className="g-4 mb-4")
 ])
 
@@ -482,7 +506,6 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
             if d["pct"] > 90: alerts.append(dbc.Alert(f"High {k} Usage!", color="danger"))
             cards.append(dbc.Col(kpi_card(k, f(d["used"]), f(d["total"]), f(d["reserved"]), f(d["available"]), d["pct"], c_real, i), md=4))
         
-        # Events Logic
         ev_tbl = html.Div("No events in range", className="text-muted p-3")
         estats_cols = []
         try:
@@ -500,7 +523,6 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 ev_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        # Inventory
         inv_tbl = html.P("No Inventory Data")
         try:
             inv_df = pd.read_sql(text("SELECT assetuniquename AS \"Server\", assetipaddress AS \"IP\", assetstatus AS \"Status\", servercores AS \"CPU\", ROUND(COALESCE(NULLIF(TRIM(servermemory),''),'0')::numeric/1024.0, 2) AS \"RAM (GB)\", totaldisk AS \"Storage (GB)\" FROM inventory WHERE assetstatus IN (:s1, :s2) AND assetlocation=:loc AND assettype=:at"), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1], "loc":INVENTORY_LOCATION, "at":INVENTORY_TYPE})
@@ -511,7 +533,7 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        return cards, alerts, build_stack_bar("CPU", cap["CPU"]), build_stack_bar("RAM", cap["RAM"]), build_stack_bar("STORAGE", cap["STORAGE"]), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
+        return cards, alerts, build_smart_trend("CPU"), build_smart_trend("RAM"), build_smart_trend("STORAGE"), ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
     return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
 
