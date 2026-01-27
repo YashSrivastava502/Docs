@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-main.py - Capacity Management Dashboard (Snapshot Edition)
-
-Changes:
-- Removed broken Trend Lines.
-- Added "Gauge Charts" (Speedometers) for instant health checks.
-- Added "Top 5 Consumers" charts to identify resource hogs.
-- Logic: Robust, crash-proof, and highly actionable.
-"""
-
 import os
 import io
 import base64
@@ -132,85 +121,43 @@ def calculate_capacity():
     }
 
 def build_gauge(title, value, max_val, color):
-    """
-    Creates a Gauge Chart (Speedometer)
-    """
-    # Safety
     if max_val <= 0: max_val = 1
-    
     fig = go.Figure(go.Indicator(
-        mode = "gauge+number+delta",
-        value = value,
+        mode = "gauge+number+delta", value = value,
         domain = {'x': [0, 1], 'y': [0, 1]},
         title = {'text': title, 'font': {'size': 14, 'color': "gray"}},
         delta = {'reference': max_val, 'increasing': {'color': "red"}, 'decreasing': {'color': "green"}, 'position': "top"},
         gauge = {
             'axis': {'range': [None, max_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
             'bar': {'color': color},
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "gray",
-            'steps': [
-                {'range': [0, max_val*0.75], 'color': 'rgba(240, 240, 240, 0.5)'},
-                {'range': [max_val*0.75, max_val], 'color': 'rgba(255, 0, 0, 0.1)'}],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': max_val * 0.9}
+            'bgcolor': "white", 'borderwidth': 2, 'bordercolor': "gray",
+            'steps': [{'range': [0, max_val*0.75], 'color': 'rgba(240, 240, 240, 0.5)'}, {'range': [max_val*0.75, max_val], 'color': 'rgba(255, 0, 0, 0.1)'}],
+            'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': max_val * 0.9}
         }
     ))
     fig.update_layout(height=250, margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', font={'color': "darkblue"})
     return fig
 
 def build_top_consumers(resource):
-    """
-    Bar chart of Top 5 Servers by Resource Usage from Inventory
-    """
     col_map = {"CPU": "servercores", "RAM": "servermemory", "STORAGE": "totaldisk"}
     col = col_map.get(resource)
-    
     try:
-        # Fetch Top 5
-        sql = f"""
-            SELECT assetuniquename, NULLIF(TRIM({col}), '')::numeric as val 
-            FROM inventory 
-            WHERE assetstatus IN (:s1, :s2) 
-            ORDER BY val DESC NULLS LAST 
-            LIMIT 5
-        """
+        sql = f"SELECT assetuniquename, NULLIF(TRIM({col}), '')::numeric as val FROM inventory WHERE assetstatus IN (:s1, :s2) ORDER BY val DESC NULLS LAST LIMIT 5"
         df = pd.read_sql(text(sql), ENGINE, params={"s1":INVENTORY_STATUS[0], "s2":INVENTORY_STATUS[1]})
-        
         if df.empty: return go.Figure()
-
-        # Unit Conversion
+        
         if resource == "RAM":
-            df["val"] = df["val"] / 1024.0 # MB -> GB
+            df["val"] = df["val"] / 1024.0
             unit = "GB"
         elif resource == "STORAGE":
-            df["val"] = df["val"] # GB
             unit = "GB"
         else:
             unit = "Cores"
 
-        # Horizontal Bar Chart
-        fig = go.Figure(go.Bar(
-            x=df["val"],
-            y=df["assetuniquename"],
-            orientation='h',
-            marker=dict(color=COLORS[resource.lower()], opacity=0.8)
-        ))
-        
-        fig.update_layout(
-            title=f"Top 5 {resource} Hogs",
-            yaxis=dict(autorange="reversed"), # Top item at top
-            xaxis_title=unit,
-            template="plotly_white",
-            height=250,
-            margin=dict(l=10,r=10,t=40,b=20)
-        )
+        fig = go.Figure(go.Bar(x=df["val"], y=df["assetuniquename"], orientation='h', marker=dict(color=COLORS[resource.lower()], opacity=0.8)))
+        fig.update_layout(title=f"Top 5 {resource} Hogs", yaxis=dict(autorange="reversed"), xaxis_title=unit, template="plotly_white", height=250, margin=dict(l=10,r=10,t=40,b=20))
         return fig
-    except Exception:
-        return go.Figure()
+    except: return go.Figure()
 
 # --- RECONCILER ---
 _reconcile_lock = threading.Lock()
@@ -468,23 +415,28 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
     m_msg = c_msg = d_msg = s_msg = dl_data = no_update
     force = False
 
+    # 1. Manual Submit
     if trig == "submit" and n_sub:
         if not srv: m_msg = dbc.Alert("Server required", color="danger")
         else:
             try:
-                ex = ENGINE.execute(text("SELECT 1 FROM inventory WHERE assetuniquename=:s"), {"s":srv}).fetchone()
+                # FIXED: Use with engine.connect() for SQLAlchemy 2.0+
+                with ENGINE.connect() as conn:
+                    ex = conn.execute(text("SELECT 1 FROM inventory WHERE assetuniquename=:s"), {"s":srv}).fetchone()
                 ok, txt = insert_event(srv, float(cpu or 0), float(ram or 0)*1024, float(stg or 0), "MANUAL", pending=(ex is None))
                 m_msg = dbc.Toast("Saved", header="Success", icon="success", duration=3000, is_open=True, style={"position":"fixed","top":10,"right":10}) if ok else dbc.Alert(txt, color="danger")
                 force = True
             except Exception as e: m_msg = dbc.Alert(str(e), color="danger")
 
+    # 2. CSV Upload
     if trig == "csv-up" and csv:
         try:
             df = parse_csv(csv, fname); cnt = 0
-            for _, r in df.iterrows():
-                ex = ENGINE.execute(text("SELECT 1 FROM inventory WHERE assetuniquename=:s"), {"s":r["server"]}).fetchone()
-                ok, _ = insert_event(r["server"], r["cpu"], r["ram_gb"]*1024, r["storage_gb"], "CSV", r["date"], pending=(ex is None))
-                if ok: cnt += 1
+            with ENGINE.connect() as conn:
+                for _, r in df.iterrows():
+                    ex = conn.execute(text("SELECT 1 FROM inventory WHERE assetuniquename=:s"), {"s":r["server"]}).fetchone()
+                    ok, _ = insert_event(r["server"], r["cpu"], r["ram_gb"]*1024, r["storage_gb"], "CSV", r["date"], pending=(ex is None))
+                    if ok: cnt += 1
             c_msg = dbc.Toast(f"Imported {cnt}", header="Success", icon="success", duration=3000, is_open=True, style={"position":"fixed","top":10,"right":10}); force = True
         except Exception as e: c_msg = dbc.Alert(str(e), color="danger")
 
@@ -537,20 +489,18 @@ def update_all(n_t, n_ref, n_sub, csv, n_del, d_start, d_end, n_exp, n_rec, n_th
                 inv_tbl = dbc.Table([html.Thead(html.Tr(header)), html.Tbody(rows)], striped=True, hover=True, className="table-modern")
         except: pass
 
-        # Build Gauges
+        # Build Visuals
         c_fig = build_gauge("CPU Used", cap["CPU"]["used"], cap["CPU"]["total"], COLORS["cpu"])
         r_fig = build_gauge("RAM Used", cap["RAM"]["used"], cap["RAM"]["total"], COLORS["ram"])
-        # Storage conversion for gauge display
         s_fig = build_gauge("Storage Used (TB)", cap["STORAGE"]["used"]/1024.0, cap["STORAGE"]["total"]/1024.0, COLORS["storage"])
 
-        # Build Tops
         tc_cpu = build_top_consumers("CPU")
         tc_ram = build_top_consumers("RAM")
         tc_stg = build_top_consumers("STORAGE")
 
         return cards, alerts, c_fig, r_fig, s_fig, tc_cpu, tc_ram, tc_stg, ev_tbl, estats_cols, inv_tbl, m_msg, c_msg, d_msg, s_msg, dl_data, datetime.now().strftime("%H:%M:%S")
 
-    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
+    return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, m_msg, c_msg, d_msg, s_msg, no_update, no_update
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
