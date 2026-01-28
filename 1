@@ -1,14 +1,4 @@
-#!/usr/bin/env python3
-"""
-main.py - Capacity Management Dashboard (Secured & Enhanced)
 
-Features:
-- Refresh Interval: 30 Minutes.
-- Events Tab: Vertical Layout (Stats -> Actions -> Table).
-- Visuals: Green/Red text for Allocation/Deallocation.
-- Security: Settings Tab protected by password ('sysadmin').
-- Gauges: Show explicit "X of Y" text.
-"""
 
 import os
 import io
@@ -353,22 +343,4 @@ view_events = html.Div(id="view-ev", style={"display": "none"}, children=[
                     dbc.Tab(label="CSV Bulk Import", children=[
                         dbc.Row([
                             dbc.Col(dcc.Upload(id="csv-up", children=dbc.Button("Select CSV File", color="secondary", outline=True, className="w-100 dashed-border")), md=6),
-                            dbc.Col(html.Div(id="csv-msg"), md=6)
-                        ], className="align-items-center mt-3")
-                    ]),
-                    dbc.Tab(label="Delete Event", children=[
-                        dbc.Row([
-                            dbc.Col(dbc.Input(id="del-id", placeholder="Event ID to Delete", type="number"), md=4),
-                            dbc.Col(dbc.Button("Delete", id="btn-del", color="danger"), md=2),
-                            dbc.Col(html.Div(id="del-msg", className="small mt-2"), md=6)
-                        ], className="align-items-center mt-3")
-                    ])
-                ], className="nav-fill")
-            ])
-        ], className="custom-card mb-4"), width=12)
-    ]),
-
-    # 3. Event Log Table - Full Width below Actions
-    dbc.Row([
-        dbc.Col(dbc.Card([
-            dbc.CardHea
+                            dbc.Col(html.D
