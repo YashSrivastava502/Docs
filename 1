@@ -1,4 +1,1 @@
-$secPass = ConvertTo-SecureString "" -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential ("fpseclan.local\SVC_Linux_Seclan", $secPass)
 
-Add-Computer -DomainName fpseclan.local -Credential $cred -Restart
