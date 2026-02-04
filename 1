@@ -1,15 +1,2 @@
-sizes_raw = az("az vm list-sizes --location eastus")
-
-size_map = {}
-for s in sizes_raw:
-    mem_mb = (
-        s.get("memoryInMb")
-        or s.get("memoryMB")
-        or s.get("memoryMb")
-        or 0
-    )
-
-    size_map[s["name"]] = {
-        "cpu": s.get("numberOfCores", "NA"),
-        "ram": round(mem_mb / 1024, 1) if mem_mb else "NA"
-    }
+tags = vm.get("tags") or {}
+tag_str = "; ".join([f"{k}={v}" for k, v in tags.items()]) if tags else ""
