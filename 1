@@ -1,2 +1,127 @@
-Remove-Item "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" -Force -ErrorAction SilentlyContinue
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" /f
+#!/usr/bin/env python3
+
+import json
+import subprocess
+import csv
+import smtplib
+from email.message import EmailMessage
+from datetime import datetime
+
+# =========================
+# CONFIGURATION
+# =========================
+RESOURCE_GROUP = "YOUR_RESOURCE_GROUP"
+CSV_FILE = f"azure_vms_{RESOURCE_GROUP}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+SMTP_SERVER = "smtp.yourcompany.local"
+SMTP_PORT = 25
+MAIL_FROM = "infra-report@yourcompany.com"
+MAIL_TO = ["ops@yourcompany.com"]
+
+# =========================
+# HELPERS
+# =========================
+def az(cmd):
+    result = subprocess.check_output(cmd, shell=True)
+    return json.loads(result)
+
+# =========================
+# FETCH VM SIZE MAP (CPU/RAM)
+# =========================
+print("Fetching VM size reference...")
+sizes_raw = az(f"az vm list-sizes --location eastus")
+size_map = {
+    s["name"]: {
+        "cpu": s["numberOfCores"],
+        "ram": round(s["memoryInMb"] / 1024, 1)
+    }
+    for s in sizes_raw
+}
+
+# =========================
+# FETCH VMS
+# =========================
+print("Fetching VMs...")
+vms = az(f"az vm list -g {RESOURCE_GROUP} -d")
+
+rows = []
+
+for vm in vms:
+    name = vm["name"]
+    status = vm.get("powerState", "unknown")
+    private_ip = vm.get("privateIps", "")
+    os_type = vm["storageProfile"]["osDisk"]["osType"]
+    size = vm["hardwareProfile"]["vmSize"]
+
+    cpu = size_map.get(size, {}).get("cpu", "NA")
+    ram = size_map.get(size, {}).get("ram", "NA")
+
+    # DISKS
+    disks = []
+    os_disk = vm["storageProfile"]["osDisk"]
+    disks.append(f"OS:{os_disk['diskSizeGb']}GB")
+
+    for d in vm["storageProfile"].get("dataDisks", []):
+        disks.append(f"DATA:{d['diskSizeGb']}GB")
+
+    disk_str = "; ".join(disks)
+
+    # TAGS
+    tags = vm.get("tags", {})
+    tag_str = "; ".join([f"{k}={v}" for k, v in tags.items()])
+
+    rows.append([
+        name,
+        status,
+        private_ip,
+        os_type,
+        size,
+        cpu,
+        ram,
+        disk_str,
+        tag_str
+    ])
+
+# =========================
+# WRITE CSV
+# =========================
+print("Writing CSV...")
+headers = [
+    "NAME",
+    "STATUS",
+    "PRIVATE_IP",
+    "OS",
+    "SIZE",
+    "CPU_vCPUs",
+    "RAM_GB",
+    "DISKS",
+    "TAGS"
+]
+
+with open(CSV_FILE, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(headers)
+    writer.writerows(rows)
+
+# =========================
+# EMAIL CSV
+# =========================
+print("Sending email...")
+msg = EmailMessage()
+msg["From"] = MAIL_FROM
+msg["To"] = ", ".join(MAIL_TO)
+msg["Subject"] = f"Azure VM Inventory - {RESOURCE_GROUP}"
+msg.set_content("Attached is the Azure VM inventory report.")
+
+with open(CSV_FILE, "rb") as f:
+    msg.add_attachment(
+        f.read(),
+        maintype="text",
+        subtype="csv",
+        filename=CSV_FILE
+    )
+
+with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
+    s.send_message(msg)
+
+print("✅ Done. CSV generated and emailed successfully.")
