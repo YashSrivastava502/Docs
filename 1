@@ -1,1 +1,69 @@
+from flask import Flask, render_template_string, request
+from ldap3 import Server, Connection, ALL
 
+app = Flask(__name__)
+
+# 🔹 CONFIGURATION (CHANGE THIS)
+LDAP_SERVER = "ldap://192.168.1.100"   # Your LDAP server IP
+BASE_DN = "dc=test,dc=local"           # Your Base DN
+USER_DN_FORMAT = "uid={},ou=users," + BASE_DN
+
+# 🔹 Simple HTML Templates
+login_page = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LDAP Login</title>
+</head>
+<body>
+    <h2>LDAP Login</h2>
+    <form method="post">
+        Username: <input type="text" name="username" required><br><br>
+        Password: <input type="password" name="password" required><br><br>
+        <input type="submit" value="Login">
+    </form>
+    <p style="color:red;">{{ error }}</p>
+</body>
+</html>
+"""
+
+success_page = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome</title>
+</head>
+<body>
+    <h2>✅ Welcome to the LDAP Server</h2>
+    <p>User authenticated successfully!</p>
+</body>
+</html>
+"""
+
+@app.route("/", methods=["GET", "POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
+        user_dn = USER_DN_FORMAT.format(username)
+
+        try:
+            server = Server(LDAP_SERVER, get_info=ALL)
+            conn = Connection(server, user=user_dn, password=password)
+            
+            if conn.bind():
+                conn.unbind()
+                return success_page
+            else:
+                error = "Invalid Credentials"
+
+        except Exception as e:
+            error = f"Connection Error: {str(e)}"
+
+    return render_template_string(login_page, error=error)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
