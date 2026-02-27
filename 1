@@ -1,1 +1,10 @@
+Get-DnsClientServerAddress
 
+Set-DnsClientServerAddress `
+-InterfaceAlias "Ethernet" `
+-ServerAddresses ("8.8.8.8","10.10.1.4","10.10.1.5")
+
+
+Set-DnsClientServerAddress `
+-InterfaceAlias "Ethernet" `
+-ServerAddresses ("10.10.1.4","10.10.1.5")
