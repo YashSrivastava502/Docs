@@ -15,16 +15,14 @@
     - name: Create SFTP batch file
       copy:
         dest: /tmp/sftp_batch
+        mode: '0600'
         content: |
           get {{ source_folder }}/collector.conf /tmp/collector.conf
           get {{ source_folder }}/collector-1.5.1.1950.sh /tmp/collector-1.5.1.1950.sh
-          exit
+          bye
 
     - name: Download files from SFTP
-      shell: >
-        sshpass -p '{{ sftp_password }}'
-        sftp -o StrictHostKeyChecking=no -P {{ sftp_port }} -b /tmp/sftp_batch
-        {{ sftp_username }}@{{ sftp_host }}
+      shell: "sshpass -p '{{ sftp_password }}' sftp -o StrictHostKeyChecking=no -P {{ sftp_port }} -b /tmp/sftp_batch {{ sftp_username }}@{{ sftp_host }}"
 
     - name: Create destination directory
       file:
@@ -36,7 +34,9 @@
       command: mv /tmp/collector.conf {{ destination_folder }}/collector.conf
 
     - name: Give execute permission
-      command: chmod +x /tmp/collector-1.5.1.1950.sh
+      file:
+        path: /tmp/collector-1.5.1.1950.sh
+        mode: '0755'
 
     - name: Run collector installer
       shell: /tmp/collector-1.5.1.1950.sh
