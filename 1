@@ -1,10 +1,40 @@
-Get-DnsClientServerAddress
+- name: Install and Configure Collector on Linux VMs
+  hosts: localhost
+  become: yes
+  become_user: root
 
-Set-DnsClientServerAddress `
--InterfaceAlias "Ethernet" `
--ServerAddresses ("8.8.8.8","10.10.1.4","10.10.1.5")
+  vars:
+    sftp_host: "10.7.253.78"
+    sftp_port: 22
+    sftp_username: "fwbackup"
+    sftp_password: "D7&oVz2zf0a$1BF"
+    source_folder: "/Network_devices_Backup"
+    destination_folder: "/etc/panw"
 
+  tasks:
 
-Set-DnsClientServerAddress `
--InterfaceAlias "Ethernet" `
--ServerAddresses ("10.10.1.4","10.10.1.5")
+    - name: Create SFTP batch file
+      copy:
+        dest: /tmp/sftp_batch
+        content: |
+          get {{ source_folder }}/collector.conf /tmp/collector.conf
+          get {{ source_folder }}/collector-1.5.1.1950.sh /tmp/collector-1.5.1.1950.sh
+          exit
+
+    - name: Download files from SFTP
+      shell: sshpass -p "{{ sftp_password }}" sftp -o StrictHostKeyChecking=no -b /tmp/sftp_batch {{ sftp_username }}@{{ sftp_host }}
+
+    - name: Create destination directory
+      file:
+        path: "{{ destination_folder }}"
+        state: directory
+        mode: '0755'
+
+    - name: Move collector config
+      command: mv /tmp/collector.conf {{ destination_folder }}/collector.conf
+
+    - name: Give execute permission
+      command: chmod +x /tmp/collector-1.5.1.1950.sh
+
+    - name: Run collector installer
+      shell: /tmp/collector-1.5.1.1950.sh
