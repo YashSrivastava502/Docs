@@ -8,7 +8,7 @@
     sftp_port: 22
     sftp_username: "fwbackup"
     sftp_password: 'D7&oVz2zf0a$1BF'
-    source_folder: "/Network_devices_Backup"
+    source_folder: "Network_devices_Backup/Collector/"
     destination_folder: "/etc/panw"
 
   tasks:
@@ -17,8 +17,8 @@
         dest: /tmp/sftp_batch
         mode: '0600'
         content: |
-          get {{ source_folder }}/collector.conf /tmp/collector.conf
-          get {{ source_folder }}/collector-1.5.1.1950.sh /tmp/collector-1.5.1.1950.sh
+          get {{ source_folder }}collector.conf /tmp/collector.conf
+          get {{ source_folder }}collector-1.5.1.1950.sh /tmp/collector-1.5.1.1950.sh
           bye
 
     - name: Download files from SFTP
