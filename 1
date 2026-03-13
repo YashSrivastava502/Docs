@@ -3,18 +3,23 @@
   become: yes
   become_user: root
 
+  vars_prompt:
+    - name: sftp_password
+      prompt: "Enter SFTP password"
+      private: yes
+
   vars:
     sftp_host: "10.7.253.78"
-    sftp_port: 22
+    sftp_port: "22"
     sftp_username: "fwbackup"
-    password_file: "/tmp/sftp_password.txt"
+    batch_file: "/tmp/sftp_batch"
     source_folder: "Network_devices_Backup/Collector/"
     destination_folder: "/etc/panw"
 
   tasks:
     - name: Create SFTP batch file
       copy:
-        dest: /tmp/sftp_batch
+        dest: "{{ batch_file }}"
         mode: "0600"
         content: |
           get {{ source_folder }}collector.conf /tmp/collector.conf
@@ -25,13 +30,31 @@
       command:
         argv:
           - sshpass
-          - -f
-          - "{{ password_file }}"
+          - -e
           - sftp
           - -o
           - StrictHostKeyChecking=no
           - -P
-          - "{{ sftp_port | string }}"
+          - "{{ sftp_port }}"
           - -b
-          - /tmp/sftp_batch
+          - "{{ batch_file }}"
           - "{{ sftp_username }}@{{ sftp_host }}"
+      environment:
+        SSHPASS: "{{ sftp_password }}"
+
+    - name: Create destination directory
+      file:
+        path: "{{ destination_folder }}"
+        state: directory
+        mode: "0755"
+
+    - name: Move collector config
+      command: mv /tmp/collector.conf {{ destination_folder }}/collector.conf
+
+    - name: Give execute permission
+      file:
+        path: /tmp/collector-1.5.1.1950.sh
+        mode: "0755"
+
+    - name: Run collector installer
+      command: /tmp/collector-1.5.1.1950.sh
