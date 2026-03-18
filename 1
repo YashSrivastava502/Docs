@@ -1,44 +1,7 @@
-pm2 delete all
-pm2 save
-
-
-sudo rm -rf /change_management_portal/*
-sudo mkdir -p /change_management_portal/releases
-sudo mkdir -p /change_management_portal/logs
-
-
-node -v
-npm -v
-pm2 -v
-
-sudo npm install -g pm2
-
-ecosystem.config.js
-
-module.exports = {
-  apps: [
-    {
-      name: "change-portal",
-      script: "npm",
-      args: "start",
-      cwd: "/change_management_portal/current",
-      instances: "max",
-      exec_mode: "cluster",
-      env: {
-        NODE_ENV: "production",
-        PORT: 3000
-      }
-    }
-  ]
-}
-
-
-azure-pipelines.yml
-
 trigger:
   branches:
     include:
-      - main
+      - master
 
 pool:
   name: SelfHostedPool
@@ -55,69 +18,71 @@ steps:
   inputs:
     versionSpec: '18.x'
 
+# 1️⃣ Install dependencies
 - script: |
     npm install
   displayName: Install dependencies
 
+# 2️⃣ Build Next.js
 - script: |
     npm run build
   displayName: Build Next.js
 
+# 3️⃣ Create versioned release
 - script: |
-
     BUILD_ID=$(Build.BuildId)
 
     mkdir -p $(release_dir)/build_$BUILD_ID
 
     rsync -av --delete ./ $(release_dir)/build_$BUILD_ID/
+  displayName: Create release
 
-  displayName: Create release version
-
+# 4️⃣ Install production dependencies
 - script: |
-
     cd $(release_dir)/build_$(Build.BuildId)
-
     npm install --production
+  displayName: Install production dependencies
 
-  displayName: Install production deps
-
+# 5️⃣ Switch current symlink
 - script: |
-
-    ln -sfn $(release_dir)/build_$(Build.BuildId) \
-    $(app_root)/current
-
+    ln -sfn $(release_dir)/build_$(Build.BuildId) $(app_root)/current
   displayName: Switch to new version
 
+# 6️⃣ Copy .env file (IMPORTANT 🔥)
+- script: |
+    cp $(app_root)/.env $(app_root)/current/.env
+  displayName: Copy .env to current
+
+# 7️⃣ Start or Reload PM2
 - script: |
 
     cd $(app_root)/current
 
     if pm2 list | grep change-portal; then
-        pm2 reload ecosystem.config.js
+        echo "PM2 process exists → Reloading"
+        pm2 reload change-portal
     else
-        pm2 start ecosystem.config.js
+        echo "PM2 process not found → Starting first time"
+        pm2 start npm --name "change-portal" -- start
     fi
 
     pm2 save
 
-  displayName: Start or reload PM2
+  displayName: Start/Reload PM2
 
+# 8️⃣ Health Check
 - script: |
 
     sleep 10
 
     STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://localhost:3000)
 
-    if [ $STATUS -ne 200 ]; then
-        echo "Health check failed"
+    if [ "$STATUS" -ne 200 ]; then
+        echo "Health check failed ❌"
+        pm2 logs --lines 50
         exit 1
     fi
 
-  displayName: Health check
+    echo "Health check passed ✅"
 
-
-
-  git push origin main
-
-  
-sudo chown -R azureagent:azureagent /change_management_portal
+  displayName: Health Check
