@@ -1,1 +1,154 @@
 
+Enable HROMA (Hitachi Remote Ops Monitor Agent) for Hitachi VSP B26 & VSP E590
+
+⸻
+
+🔹 Change Type
+
+Standard Change (Low Risk – Monitoring Enablement)
+
+⸻
+
+🔹 Objective
+
+To enable remote monitoring and call-home functionality for:
+	•	Hitachi VSP B26
+	•	Hitachi VSP E590
+
+This will allow proactive alerting, automatic ticketing, and health monitoring via Hitachi Support.
+
+⸻
+
+🔹 Scope
+	•	Configure HROMA agent on monitoring server
+	•	Add storage systems (VSP B26 & VSP E590)
+	•	Enable SNMP communication
+	•	Enable secure transport (HTTPS)
+	•	Validate communication and monitoring
+
+⸻
+
+🔹 Pre-Checks
+	1.	Verify HROMA installation:
+	•	Access URL: http://localhost:6696
+	•	Confirm agent is running
+	2.	Verify network connectivity:
+	•	HROMA → Storage (Ping + SNMP port 161)
+	•	HROMA → Internet (HTTPS 443)
+	3.	Collect required details:
+	•	Site ID
+	•	Storage IPs (GUM/SVP)
+	•	SNMP community / credentials
+	4.	Take backup / screenshots of current state
+
+⸻
+
+🔹 Implementation Steps
+
+✅ Step 1: Login to HROMA
+	•	Open browser → http://localhost:6696
+	•	Login using Administrator
+
+⸻
+
+✅ Step 2: Configure Base Settings
+
+Go to:
+👉 Configuration → Base
+	•	Enter:
+	•	Site ID
+	•	Scan Interval (150 sec recommended)
+	•	Daily report time
+	•	Save configuration
+
+⸻
+
+✅ Step 3: Configure Transport (Call-Home)
+
+Go to:
+👉 Configuration → Transport Agents
+	•	Enable HTTPS transport
+	•	Configure proxy (if required)
+	•	Save
+
+⸻
+
+✅ Step 4: Configure SNMP on Storage
+
+On VSP B26 & VSP E590:
+	•	Enable SNMP Agent
+	•	Add HROMA server IP
+	•	Configure:
+	•	SNMP v2 or v3
+	•	Community string (e.g., public)
+
+⸻
+
+✅ Step 5: Add Storage Devices
+
+Go to:
+👉 Summary → Add Device
+
+Fill details:
+
+For VSP B26:
+	•	Device Type: VSP E Series
+	•	IP (SVP/GUM)
+	•	Site ID
+	•	Communication Type: SVP
+
+For VSP E590:
+	•	Device Type: VSP E Series
+	•	GUM IPs:
+	•	Primary & Secondary
+	•	Communication Type: GUM / SVP
+
+Click Add
+
+⸻
+
+✅ Step 6: Configure Credentials
+
+Go to:
+👉 User Management
+	•	Add SNMP credentials
+	•	Map credentials to devices
+
+⸻
+
+✅ Step 7: Verify Device Status
+
+Go to:
+👉 Summary
+
+Check:
+	•	Device Status = ✅ Device Okay
+	•	No Comms Error
+
+⸻
+
+✅ Step 8: Test Communication
+
+Go to:
+👉 Transport History
+	•	Click Request Report
+	•	Verify:
+	•	Status = Success
+
+⸻
+
+🔹 Post-Validation
+	•	Devices visible in HROMA
+	•	No communication errors
+	•	Successful transport logs
+	•	Monitoring enabled
+
+⸻
+
+🔹 Rollback Plan
+
+If issue occurs:
+	1.	Remove added devices from HROMA
+	2.	Disable transport agent
+	3.	Restore previous SNMP settings on storage
+	4.	Stop HROMA service (if required)
